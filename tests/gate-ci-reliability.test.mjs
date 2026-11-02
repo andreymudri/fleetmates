@@ -9,7 +9,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runCommandCheck, runChecks } from '../scripts/gate-runner.mjs'
+import { runCommandCheck, runChecks, defaultExec } from '../scripts/gate-runner.mjs'
 import { protectedPaths, reviewLenses } from '../scripts/gate-config.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -92,6 +92,8 @@ test('flaky: without a report, one failure passes and names the whole command', 
   assert.equal(result.status, 'pass', result.output)
   assert.equal(result.flaky.length, 1)
   assert.ok(result.flaky[0].includes('fails-n-times.mjs'), result.flaky[0])
+  // Not a git worktree, so there is no tracked quarantine to write.
+  assert.equal(existsSync(path.join(cwd, 'fleetmates.flaky.json')), false)
 })
 
 test('flaky: two failures fail the check with the original exit code', async (t) => {
@@ -142,6 +144,18 @@ test('flaky: the check timeout bounds both attempts together', async (t) => {
   const result = await runCommandCheck({ name: 'test', kind: 'command', run: nodeRun(slow), flaky: true, timeoutMs: 1600 }, { cwd })
   assert.equal(result.status, 'fail')
   assert.match(result.output, /timed out/)
+})
+
+test('flaky: an attempt that timed out is not retried', async (t) => {
+  const cwd = await scratch(t)
+  const hang = path.join(cwd, 'hang.mjs')
+  await writeFile(hang, 'setInterval(() => {}, 1000)\n')
+  let spawned = 0
+  const exec = (...args) => { spawned += 1; return defaultExec(...args) }
+  const result = await runCommandCheck({ name: 'hang', kind: 'command', run: nodeRun(hang), flaky: true, timeoutMs: 1000 }, { cwd, exec })
+  assert.equal(result.status, 'fail')
+  assert.match(result.output, /timed out/)
+  assert.equal(spawned, 1)
 })
 
 test('platformSim: a timed-out check leaves no simulator scratch directory behind', { skip: WIN && 'process groups and SIGTERM are POSIX' }, async (t) => {

@@ -656,10 +656,11 @@ export function reliabilityFault(check) {
   return null
 }
 
-// One attempt under scripts/platform-sim.mjs, in a node child that the gate's `exec` spawns like
-// any other check, so the timeout, the process-group kill, the preview claim and the log apply to
-// it unchanged. It ignores SIGTERM so that, when the timeout signals the group, it outlives the
-// command long enough for `runPlatformSim` to remove its scratch directory.
+// One attempt under scripts/platform-sim.mjs, in a node child that the gate's `exec` spawns with
+// the same options as a plain check: the timeout, the process-group kill and the log are tested on
+// this path (tests/gate-ci-reliability.test.mjs); the preview claim rides the same `onSpawn` and
+// is not separately tested here. It ignores SIGTERM so that, when the timeout signals the group,
+// it outlives the command long enough for `runPlatformSim` to remove its scratch directory.
 const SIM_TRAMPOLINE = `
 const { runPlatformSim } = await import(${JSON.stringify(new URL('./platform-sim.mjs', import.meta.url).href)})
 process.on('SIGTERM', () => {})
@@ -676,7 +677,10 @@ process.exitCode = r.code
 `
 
 // The check's `run` string as argv for the flaky detector and the simulator, both of which spawn
-// without a shell: the platform shell, invoked the way node's own `shell: true` invokes it.
+// without a shell: the platform shell, invoked the way node's own `shell: true` invokes it. Without
+// the simulator the flaky path hands this exact array back to `exec` as the `run` string with a
+// shell. Under the simulator on win32, node quotes `run` as an ordinary argument for cmd.exe; a
+// `run` holding double quotes is unverified there.
 function shellArgv(run) {
   return process.platform === 'win32'
     ? [process.env.ComSpec || 'cmd.exe', '/d', '/s', '/c', run]
