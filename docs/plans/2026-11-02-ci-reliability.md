@@ -158,9 +158,11 @@ export function ciAdvice(summary, pkg)       // string[] of warnings, each one l
 - Modify: `.github/workflows/test.yml`
 - Modify: `.github/workflows/deck.yml`
 - Modify: `package.json`
+- Test: `hub/test/unit/m1-scaffold.test.mjs`
 
 **Depends:** T6
 
 - [ ] **Step 1:** In `test.yml` and `deck.yml`, run on `push` to every branch (keep `pull_request`), and run the suites through `node scripts/cli.mjs flaky -- npm test` (root) and `node scripts/cli.mjs flaky -- npm --prefix hub test` (hub).
+- [ ] **Step 1b:** Update the deck CI expectations in `hub/test/unit/m1-scaffold.test.mjs` that pin `deck.yml` (trigger and last step) to the new workflow, changing nothing else.
 - [ ] **Step 2:** Add `"test:platform-sim": "node scripts/cli.mjs platform-sim -- npm test"` to `package.json` scripts.
 - [ ] **Step 3:** Run `npm run test:platform-sim` with the timeout above and report the counts. A failure here is a real portability bug: report it with the test name rather than weakening anything.
