@@ -13,8 +13,8 @@ test('rejects the "too simple to need a design" rationalization', async () => {
   assert.match(await body(), /too simple/i)
 })
 
-test('requires questions one at a time', async () => {
-  assert.match(await body(), /one at a time/i)
+test('requires questions in grilling rounds of up to four', async () => {
+  assert.match(await body(), /up to four at a time/i)
 })
 
 test('terminates by handing off to writing-plans', async () => {
