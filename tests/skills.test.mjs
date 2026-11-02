@@ -200,3 +200,48 @@ test('the README documents the escape hatch to full test output', async () => {
   const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8')
   assert.match(readme, /npm run test:verbose/)
 })
+
+// The watchdog's skill text. Comments are stripped before anything is matched, so a markdown
+// comment that names an event or a command cannot stand in for the instruction itself.
+const stripComments = (text) => text.replace(/<!--[\s\S]*?-->/g, '')
+const rawOf = (section) => section.blocks.map((b) => b.raw).join('\n')
+
+test('stripComments removes a markdown comment, so a commented instruction cannot satisfy these tests', () => {
+  assert.equal(stripComments('a <!-- cli.mjs" watch --run --> b'), 'a  b')
+  assert.equal(stripComments('<!--\n`resume`\n-->\n'), '\n')
+})
+
+test('parallel-execution starts the watchdog under Monitor in its own section between sections 2 and 3', async () => {
+  const { body } = await skill('parallel-execution')
+  const doc = parseDoc(stripComments(body), 'parallel-execution')
+  const watch = doc.section(/^Watch the phase$/)
+  assert.equal(watch.level, 2, 'Watch the phase must be a top-level section')
+  const top = doc.sections.filter((s) => s.level === 2).map((s) => s.title)
+  const at = top.indexOf('Watch the phase')
+  assert.equal(top[at - 1], '2. Dispatch the phase', 'Watch the phase must come right after section 2')
+  assert.match(top[at + 1] ?? '', /^3\. /, 'Watch the phase must come right before section 3')
+  assert.ok(
+    watch.code.some((b) => b.code.includes('cli.mjs" watch --run')),
+    'Watch the phase must carry a cli.mjs watch --run command block',
+  )
+  assertStatement(watch, /\bMonitor\b/, 'Watch the phase must tell the orchestrator to run watch with Monitor')
+  // Section 2 is locked by tests/skill-contracts.test.mjs, so the watchdog stays out of it.
+  const dispatch = doc.section(/^2\. Dispatch the phase$/)
+  assert.ok(!rawOf(dispatch).includes('cli.mjs" watch --run'), 'section 2 must not carry the watch command')
+  assert.ok(!/\bMonitor\b/.test(rawOf(dispatch)), 'section 2 must not name Monitor')
+})
+
+test('fleet-supervision documents the watchdog events and the commands each response runs', async () => {
+  const { body } = await skill('fleet-supervision')
+  const doc = parseDoc(stripComments(body), 'fleet-supervision')
+  const watchdog = doc.section(/^The watchdog$/)
+  const raw = rawOf(watchdog)
+  for (const event of ['start', 'resume', 'respawn', 'orphan', 'unmeasured', 'watch-error', 'exit']) {
+    assert.ok(raw.includes(`\`${event}\``), `The watchdog section must name the ${event} event`)
+  }
+  assert.match(raw, /reason: spinning/, 'The watchdog section must name the spinning reason')
+  assert.match(raw, /cli\.mjs"? rescue --run/, 'The watchdog section must name rescue --run')
+  assert.match(raw, /cli\.mjs"? dispatch [^\n|]*--task/, 'The watchdog section must name dispatch with --task')
+  // The heartbeat report itself did not change: liveness still only reports.
+  assertStatement(doc.section(/^The heartbeat$/), /^It reports; it does not act\.$/, 'liveness must still be described as report-only')
+})

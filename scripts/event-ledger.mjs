@@ -7,9 +7,10 @@ import path from 'node:path'
 
 export const MAX_LEDGER_BYTES = 1024 * 1024
 export const MAX_STALL_BLOCKS = 3
-const KINDS = new Set(['task-started', 'command-run', 'gate-result', 'handoff', 'stop-requested', 'stall-block', 'hook-fired'])
+const KINDS = new Set(['task-started', 'command-run', 'gate-result', 'handoff', 'stop-requested', 'stall-block', 'hook-fired', 'watchdog'])
 const RESULTS = new Set(['pass', 'fail', 'unknown', 'done', 'blocked', 'running'])
-const HOOKS = new Set(['SessionStart', 'PreCompact', 'PostToolUse', 'SubagentStop', 'Stop'])
+const HOOKS = new Set(['SessionStart', 'PreCompact', 'PostToolUse', 'PostToolUseFailure', 'SubagentStop', 'Stop'])
+const WATCH_ACTIONS = new Set(['resume', 'respawn', 'orphan', 'unmeasured'])
 export const fingerprint = (text) => createHash('sha256').update(String(text)).digest('hex')
 
 export function projectEvent(value) {
@@ -18,6 +19,7 @@ export function projectEvent(value) {
   if (RESULTS.has(value.result)) event.result = value.result
   if (/^[a-f0-9]{64}$/.test(value.fingerprint ?? '')) event.fingerprint = value.fingerprint
   if (HOOKS.has(value.hook)) event.hook = value.hook
+  if (event.kind === 'watchdog' && WATCH_ACTIONS.has(value.action)) event.action = value.action
   return event
 }
 
@@ -66,11 +68,13 @@ export async function readEvents(file) {
 }
 
 export function ledgerSummary(events) {
-  const counts = Object.fromEntries([...KINDS].map(kind => [kind, 0]))
+  // A watchdog event records supervision, not teammate progress: it is neither counted nor a stop.
+  const counts = Object.fromEntries([...KINDS].filter(kind => kind !== 'watchdog').map(kind => [kind, 0]))
   let gate = 'unknown', handoff = 'running', blocks = 0, stops = 0
   const successes = new Set()
   for (const raw of events) {
     const event = projectEvent(raw)
+    if (event.kind === 'watchdog') continue
     counts[event.kind] += 1
     if (event.kind === 'gate-result') gate = event.result ?? 'unknown'
     if (event.kind === 'handoff') handoff = event.result ?? 'unknown'
