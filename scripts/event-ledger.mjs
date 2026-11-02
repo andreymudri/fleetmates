@@ -24,24 +24,33 @@ export function projectEvent(value) {
 }
 
 export function ledgerPath(root, runId, taskId) {
-  if (typeof runId !== 'string' || !runId || runId.split(/[\\/]/).some(p => !p || p === '.' || p === '..')) throw new Error('invalid ledger run')
+  if (typeof runId !== 'string' || !runId || runId.split(/[\\/]/).some(p => !p || p === '.' || p === '..' || p === '.fleetmates' || p === 'fleetmates')) throw new Error('invalid ledger run')
   if (typeof taskId !== 'string' || !taskId) throw new Error('invalid ledger task')
   const target = path.resolve(root, '.fleetmates', runId, 'ledger', `${fingerprint(taskId)}.jsonl`)
   if (!target.startsWith(path.resolve(root, '.fleetmates') + path.sep)) throw new Error('ledger escapes root')
   return target
 }
 
-// A link is refused only below the state directory (`.fleetmates/` for a run ledger, `fleetmates/`
-// for hook receipts), the part a teammate can plant. Above it the path is the user's: macOS
-// reaches the temp dir through /var -> /private/var and Windows through 8.3 names like RUNNER~1,
-// so comparing the whole path to its realpath refused every ledger there. Without such a
-// directory in the path, the whole path must be its own realpath, as before.
+// A link is refused only below the state directory, the part a teammate can plant. Above it the
+// path is the user's: macOS reaches the temp dir through /var -> /private/var and Windows through
+// 8.3 names like RUNNER~1, so comparing the whole path to its realpath refused every ledger there.
+//
+// The anchor is the parent of the OUTERMOST `.fleetmates`, never the nearest: a run id is
+// teammate-influenced (the location record that names it is teammate-written), and a nearest
+// match let a run id of `x/fleetmates` move the anchor below a link the teammate planted at
+// `.fleetmates/x`, sending the ledger outside the repository. Hook receipts live under the config
+// dir's `fleetmates/` and contain no `.fleetmates`, so they anchor on that. With neither, the
+// whole path must be its own realpath, as before.
 function stateAnchor(p) {
+  let outer = null
+  let nearestPlain = null
   for (let cur = p; ; cur = path.dirname(cur)) {
     const base = path.basename(cur)
-    if (base === '.fleetmates' || base === 'fleetmates') return path.dirname(cur)
-    if (path.dirname(cur) === cur) return null
+    if (base === '.fleetmates') outer = path.dirname(cur)
+    if (base === 'fleetmates' && nearestPlain === null) nearestPlain = path.dirname(cur)
+    if (path.dirname(cur) === cur) break
   }
+  return outer ?? nearestPlain
 }
 
 async function expected(p) {

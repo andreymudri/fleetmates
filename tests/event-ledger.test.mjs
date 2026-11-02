@@ -73,6 +73,29 @@ test('ledger accepts a root reached through a link and refuses a linked ledger d
   await assert.rejects(appendEvent(ledgerPath(repo, 'r2', 'T1'), event('task-started')), /parent is a link/)
 }))
 
+// Found by security review of the anchor change: a teammate writes the location record that names
+// its run id, so a run id of `x/fleetmates` plus a link at `.fleetmates/x` must not move the anchor
+// below the link and send the ledger outside the repository.
+test('a run id cannot move the ledger anchor below a planted link', async () => fixture(async root => {
+  const outside = path.join(root, 'outside')
+  const repo = path.join(root, 'repo')
+  await mkdir(outside)
+  await mkdir(path.join(repo, '.fleetmates'), { recursive: true })
+  try { await symlink(outside, path.join(repo, '.fleetmates', 'x'), 'dir') } catch (err) { if (err.code === 'EPERM') return; throw err }
+  for (const runId of ['x/fleetmates', 'x/.fleetmates']) assert.throws(() => ledgerPath(repo, runId, 'T1'), /invalid ledger run/)
+  for (const sub of ['fleetmates', '.fleetmates']) {
+    const file = path.join(repo, '.fleetmates', 'x', sub, 'ledger', `${fingerprint('T1')}.jsonl`)
+    await assert.rejects(appendEvent(file, event('task-started')), /parent is a link/)
+    await assert.rejects(readEvents(file))
+  }
+  const { readdir } = await import('node:fs/promises')
+  for (const sub of ['fleetmates', '.fleetmates']) {
+    const ledgerDir = path.join(outside, sub, 'ledger')
+    const files = await readdir(ledgerDir).catch(() => [])
+    assert.deepEqual(files, [], `nothing written under ${sub}`)
+  }
+}))
+
 test('stall detection counts events, caps blocks and requires new successful evidence', () => {
   const events = [event('command-run', { result: 'fail', fingerprint: fingerprint('bad') }), event('stop-requested'), event('stop-requested')]
   assert.equal(stallDecision(events).block, true)
