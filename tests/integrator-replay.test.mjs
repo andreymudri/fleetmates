@@ -302,6 +302,23 @@ test('the scratch clone holds the run branch at the first parent and every task 
   assert.equal(git(fx.repo, ['for-each-ref', '--format=%(objectname) %(refname)']), before, 'the source repository is never written')
 })
 
+test('the scratch clone checks files out byte for byte under a global core.autocrlf=true', async (t) => {
+  const fx = await buildFixture()
+  t.after(() => rm(fx.dir, { recursive: true, force: true }))
+  const p2 = byPhase(await integrationsOf(fx), 'r1', 2)
+  const globalConfig = path.join(fx.dir, 'gitconfig-autocrlf')
+  await writeFile(globalConfig, '[core]\n\tautocrlf = true\n', 'utf8')
+  const saved = process.env.GIT_CONFIG_GLOBAL
+  process.env.GIT_CONFIG_GLOBAL = globalConfig
+  t.after(() => { if (saved === undefined) delete process.env.GIT_CONFIG_GLOBAL; else process.env.GIT_CONFIG_GLOBAL = saved })
+  const { cloneDir } = await buildIntegrationClone({ integration: p2, tmpRoot: fx.tmpRoot })
+  try {
+    assert.equal(await readFile(path.join(cloneDir, 'base.txt'), 'utf8'), 'from T1\n')
+  } finally {
+    await rm(cloneDir, { recursive: true, force: true })
+  }
+})
+
 test('the dispatch prompt names the branches in the recorded order with the exact single-line messages', async (t) => {
   const fx = await buildFixture()
   t.after(() => rm(fx.dir, { recursive: true, force: true }))

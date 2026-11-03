@@ -164,6 +164,9 @@ async function fixture(t, { review = false, command = nodeCommand('const fs=requ
   t.after(() => rm(root, { recursive: true, force: true }))
   if (typeof command === 'function') command = command(root)
   git(root, 'init', '-b', 'main')
+  // The integration's git drops every GIT_* variable, platform-sim's GIT_CONFIG_GLOBAL included,
+  // so a checkout under the simulated autocrlf would read as dirty. Repository config is seen by both.
+  git(root, 'config', 'core.autocrlf', 'false')
   git(root, 'config', 'user.name', 'Example')
   git(root, 'config', 'user.email', 'example@example.invalid')
   await writeFile(path.join(root, 'plan.md'), files.map((file, i) => `### Task ${i + 1}: task\n\n**Files:**\n- Create: \`${file}\`\n`).join('\n'))

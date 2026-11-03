@@ -355,7 +355,13 @@ before a push where possible, and reported rather than hidden where not:
 - `platform-sim -- <command...>` runs a command with the temp directory reached through a symlink
   whose path holds a space, git set to `core.autocrlf=true` over your own global config, and
   `umask 077` on POSIX, and exits with the command's own code. A gate `command` check with
-  `"platformSim": true` runs this way instead of plainly.
+  `"platformSim": true` runs this way instead of plainly. The autocrlf setting travels in
+  `GIT_CONFIG_GLOBAL`, so code that strips `GIT_*` variables before calling git does not see it.
+- `ci-local [--dry-run]` runs on this machine the `run:` steps of every workflow job whose
+  runner is this OS, in order, the way a hosted runner would, and stops at the first failure.
+  It skips and names what it cannot reproduce (`uses:` actions, other OSes, expressions and
+  `if:` conditions it cannot evaluate), and a global git config a step changes is put back
+  after that step. The finish runs it before any push, so the remote CI confirms instead of discovering.
 - `flaky [--report <path>] -- <command...>` retries a failing command exactly once. A pass on the
   retry exits 0, prints a `flaky:` line per test and records the test in the tracked
   `fleetmates.flaky.json`, which is protected like the gate manifest. With a `--report` that is a
