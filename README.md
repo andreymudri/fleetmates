@@ -342,12 +342,15 @@ Failures that only show up on another operating system, or only some of the time
 before a push where possible, and reported rather than hidden where not:
 
 - `platform-sim -- <command...>` runs a command with the temp directory reached through a symlink
-  whose path holds a space, git set to `core.autocrlf=true` over your own global config, and
+  whose path holds a space, git set to `core.autocrlf=true` at the system level over your own, and
   `umask 077` on POSIX, and exits with the command's own code. A gate `command` check with
   `"platformSim": true` runs this way instead of plainly. The autocrlf setting travels in
-  `GIT_CONFIG_GLOBAL`, so code that strips `GIT_*` variables before calling git does not see it.
+  `GIT_CONFIG_SYSTEM`, so code that strips `GIT_*` variables before calling git does not see it.
 - `ci-local [--dry-run]` runs on this machine the `run:` steps of every workflow job whose
   runner is this OS, in order, the way a hosted runner would, and stops at the first failure.
+  Each job gets a fresh `HOME` and runs under `platform-sim`, so a test that depends on this
+  machine's own config or on a canonical temp path fails here, not on the runner
+  (`--keep-home`, `--no-platform-sim` turn either off).
   It skips and names what it cannot reproduce (`uses:` actions, other OSes, expressions and
   `if:` conditions it cannot evaluate), and a global git config a step changes is put back
   after that step. The finish runs it before any push, so the remote CI confirms instead of discovering.

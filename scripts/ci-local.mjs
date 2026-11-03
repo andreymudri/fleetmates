@@ -10,16 +10,28 @@
 // other than a `runner.os` comparison, a shell other than bash, sh, pwsh, powershell and cmd, and
 // a job whose steps it cannot read.
 //
-// Steps run in the user's own environment, as a runner's steps run in its: no variable is added
-// beyond the GITHUB_* and RUNNER_* files and names a step reads. A `git config --global` step (a CI
-// identity, say) would change the user's real global git config, so each global git config file is
-// read before every step and written back, or removed, after it when the step changed it, and the
-// run says so. An interrupted run restores them before it exits.
-import { mkdtemp, writeFile, readFile, rm, unlink } from 'node:fs/promises'
+// By default each job runs in an environment shaped like a fresh hosted runner, not like this
+// developer's shell, because a check that passes only here is the failure this exists to stop:
+//   - a fresh HOME: HOME, USERPROFILE and the XDG base directories point at an empty directory
+//     for the job, and GIT_CONFIG_GLOBAL is dropped, so a test that reads the user's own config
+//     (~/.config/<tool>, ~/.gitconfig, ~/.npmrc) sees what a runner sees: nothing. The toolchain
+//     stays, as a runner comes with its tools installed: the data directories of mise, asdf,
+//     volta, rustup, cargo, pyenv, nvm and bun, and the npm cache, keep pointing at the real ones.
+//   - the platform simulator (scripts/platform-sim.mjs): TMPDIR behind a symlink whose path holds
+//     a space, core.autocrlf=true, and umask 077 on POSIX. The workflow's own env is applied over
+//     it, as a job's env is applied over the runner's.
+// `keepHome: true` and `platformSim: false` turn either off. With the user's own HOME, a
+// `git config --global` step (a CI identity, say) would change the user's real global git config,
+// so each global git config file is read before every step and written back, or removed, after
+// it when the step changed it, and the run says so. An interrupted run restores them before it
+// exits.
+import { mkdtemp, mkdir, writeFile, readFile, rm, unlink } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import path from 'node:path'
 import { readWorkflows, runnerOs } from './ci-workflows.mjs'
+import { buildSimEnv, UMASK_TRAMPOLINE } from './platform-sim.mjs'
 
 const NODE_OS = { linux: 'linux', darwin: 'macos', win32: 'windows' }
 const RUNNER_OS = { linux: 'Linux', macos: 'macOS', windows: 'Windows' }
@@ -191,6 +203,36 @@ export function globalGitGuard(env) {
   }
 }
 
+// Toolchain locations a fresh HOME must not hide: [variable, path under the real HOME]. Each is
+// set only when the user has not set it and the directory exists.
+const TOOLCHAIN_DIRS = [
+  ['MISE_DATA_DIR', '.local/share/mise'], ['MISE_CONFIG_DIR', '.config/mise'], ['MISE_CACHE_DIR', '.cache/mise'],
+  ['MISE_STATE_DIR', '.local/state/mise'], ['ASDF_DATA_DIR', '.asdf'], ['VOLTA_HOME', '.volta'],
+  ['RUSTUP_HOME', '.rustup'], ['CARGO_HOME', '.cargo'], ['PYENV_ROOT', '.pyenv'], ['NVM_DIR', '.nvm'],
+  ['BUN_INSTALL', '.bun'], ['npm_config_cache', '.npm'],
+]
+const HOME_KEYS = ['HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'GIT_CONFIG_GLOBAL']
+
+// The environment a job starts from when it gets a fresh HOME at `home`.
+export function freshHomeEnv(baseEnv, home, { realHome = baseEnv.HOME ?? baseEnv.USERPROFILE ?? homedir(), exists = existsSync } = {}) {
+  const env = {}
+  for (const [k, v] of Object.entries(baseEnv)) if (!HOME_KEYS.includes(k.toUpperCase())) env[k] = v
+  Object.assign(env, {
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    XDG_CACHE_HOME: path.join(home, '.cache'),
+    XDG_DATA_HOME: path.join(home, '.local', 'share'),
+    XDG_STATE_HOME: path.join(home, '.local', 'state'),
+  })
+  if (process.platform === 'win32' || baseEnv.USERPROFILE !== undefined) env.USERPROFILE = home
+  for (const [key, rel] of TOOLCHAIN_DIRS) {
+    if (baseEnv[key] !== undefined) continue
+    const dir = path.join(realHome, ...rel.split('/'))
+    if (exists(dir)) env[key] = dir
+  }
+  return env
+}
+
 // Runs the plan. Returns { code, ran, skipped, failed }: code 0 when every step it ran passed and
 // at least one ran, 1 at the first step that failed (nothing after it runs), 3 when there was
 // nothing to run here. `spawnFn` and `write` are seams; `write` gets each line this prints,
@@ -202,6 +244,9 @@ export async function runLocalCi(root, {
   write = (line) => process.stdout.write(`${line}\n`),
   onOutput = (chunk) => process.stdout.write(chunk),
   dryRun = false,
+  keepHome = false,
+  platformSim = true,
+  buildSim = buildSimEnv,
 } = {}) {
   const os = NODE_OS[platform]
   if (!os) { write(`ci-local: ${platform} is not an OS a GitHub-hosted runner offers`); return { code: 3, ran: 0, skipped: [], failed: null } }
@@ -218,6 +263,25 @@ export async function runLocalCi(root, {
     for (const job of plan.jobs) {
       let jobEnv = { ...job.env }
       let pathPrefix = []
+      let runnerEnv = baseEnv
+      let sim = null
+      const shape = []
+      if (!dryRun && job.steps.some((s) => s.action === 'run')) {
+        if (!keepHome) {
+          const home = path.join(scratch, `home-${plan.jobs.indexOf(job)}`)
+          await mkdir(home, { recursive: true })
+          runnerEnv = freshHomeEnv(baseEnv, home)
+          shape.push('fresh HOME')
+        }
+        if (platformSim) {
+          sim = await buildSim({ baseEnv: runnerEnv, platform, homedir: runnerEnv.HOME ?? homedir() })
+          runnerEnv = sim.env
+          shape.push(`platform-sim applied ${sim.applied.join(', ')}${sim.skipped.length ? `; skipped ${sim.skipped.map((x) => x.name).join(', ')}` : ''}`)
+        }
+        write(`ci-local: ${job.where}: runner environment: ${shape.length ? shape.join('; ') : 'this shell, unchanged'}`)
+      }
+      const umask = sim?.applied.includes('umask-077')
+      try {
       for (const [n, step] of job.steps.entries()) {
         const label = `${job.where} [${n + 1}] ${step.name}`
         if (step.action === 'skip') { skipped.push({ where: label, reason: step.reason }); write(`ci-local: ${label}: skipped (${step.reason})`); continue }
@@ -229,7 +293,7 @@ export async function runLocalCi(root, {
         const invocation = shellInvocation(step.shell, os, script)
         await writeFile(script, invocation.pwsh ? `${PWSH_PRELUDE}${step.run}${PWSH_EPILOGUE}` : step.run)
         const sep = os === 'windows' ? ';' : ':'
-        const env = { ...baseEnv, ...jobEnv, ...step.env, ...files, GITHUB_WORKSPACE: root, RUNNER_OS: RUNNER_OS[os], RUNNER_TEMP: scratch }
+        const env = { ...runnerEnv, ...jobEnv, ...step.env, ...files, GITHUB_WORKSPACE: root, RUNNER_OS: RUNNER_OS[os], RUNNER_TEMP: scratch }
         const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH'
         if (pathPrefix.length) env[pathKey] = [...pathPrefix, env[pathKey]].filter(Boolean).join(sep)
         const cwd = step.workingDirectory === null ? root : path.resolve(root, step.workingDirectory)
@@ -237,7 +301,8 @@ export async function runLocalCi(root, {
         await guard.snapshot()
         let result
         try {
-          result = await spawnFn({ file: invocation.file, args: invocation.args, cwd, env, verbatim: invocation.verbatim, onOutput })
+          const [file, args] = umask ? [process.execPath, ['-e', UMASK_TRAMPOLINE, '--', invocation.file, ...invocation.args]] : [invocation.file, invocation.args]
+          result = await spawnFn({ file, args, cwd, env, verbatim: invocation.verbatim, onOutput })
         } finally {
           for (const file of await guard.restore()) write(`ci-local: ${label}: changed ${file}; restored it`)
         }
@@ -249,6 +314,9 @@ export async function runLocalCi(root, {
         jobEnv = { ...jobEnv, ...parseEnvFile(await readFile(files.GITHUB_ENV, 'utf8')) }
         const added = (await readFile(files.GITHUB_PATH, 'utf8')).split(/\r?\n/).filter(Boolean)
         pathPrefix = [...added.reverse(), ...pathPrefix]
+      }
+      } finally {
+        if (sim) await sim.cleanup().catch((err) => write(`ci-local: could not remove the simulator scratch directory: ${err.message}`))
       }
     }
     if (dryRun) { write(`ci-local: dry run, ${skipped.length} skipped`); return { code: 0, ran: 0, skipped, failed: null } }

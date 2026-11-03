@@ -212,7 +212,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   platform-sim [--root <path>] -- <command...>
   flaky    [--report <path>] [--root <path>] -- <command...>
   ci-wait  --branch <name> [--minutes <1-720>] [--root <path>]
-  ci-local [--dry-run] [--root <path>]
+  ci-local [--dry-run] [--keep-home] [--no-platform-sim] [--root <path>]
   config   list [--root <path>]
   config   get <key> [--root <path>]
   config   set <key> <value> [--root <path>] [--local]
@@ -650,7 +650,7 @@ export const KNOWN_FLAGS = {
   'platform-sim': [],
   flaky: ['report'],
   'ci-wait': ['branch', 'minutes'],
-  'ci-local': ['dry-run'],
+  'ci-local': ['dry-run', 'keep-home', 'no-platform-sim'],
   // Forwarded to hub/bin/fleetmates-deck.mjs; forwardDeck narrows these per deck subcommand.
   ui: [],
   deck: ['dry-run', 'rotate-token'],
@@ -7595,12 +7595,20 @@ export async function runCli(argv, io = { out: console.log }) {
     }
   }
 
-  // `ci-local [--dry-run]`: runs, from the project root, the CI workflow steps this OS can run
-  // (scripts/ci-local.mjs). Exit 0 every step it ran passed, 1 a step failed, 3 nothing runs here.
+  // `ci-local [--dry-run] [--keep-home] [--no-platform-sim]`: runs, from the project root, the CI
+  // workflow steps this OS can run (scripts/ci-local.mjs), by default with a fresh HOME and under
+  // the platform simulator. Exit 0 every step it ran passed, 1 a step failed, 3 nothing runs here.
   // `--dry-run` lists what would run and what is skipped, and runs nothing.
   if (command === 'ci-local') {
-    if (flags['dry-run'] !== undefined && flags['dry-run'] !== true) { io.out(`--dry-run takes no value\n\n${USAGE}`); return 2 }
-    const { code } = await runLocalCi(root, { dryRun: flags['dry-run'] === true, write: (line) => io.out(printable(line)) })
+    for (const flag of ['dry-run', 'keep-home', 'no-platform-sim']) {
+      if (flags[flag] !== undefined && flags[flag] !== true) { io.out(`--${flag} takes no value\n\n${USAGE}`); return 2 }
+    }
+    const { code } = await runLocalCi(root, {
+      dryRun: flags['dry-run'] === true,
+      keepHome: flags['keep-home'] === true,
+      platformSim: flags['no-platform-sim'] !== true,
+      write: (line) => io.out(printable(line)),
+    })
     return code
   }
 

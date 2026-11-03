@@ -6,7 +6,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SIM_CONDITIONS, buildSimEnv, runPlatformSim } from '../scripts/platform-sim.mjs'
+import { SIM_CONDITIONS, buildSimEnv, runPlatformSim, defaultSystemOrigins } from '../scripts/platform-sim.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const realpathProbe = path.join(here, 'fixtures', 'platform-sim', 'realpath-probe.mjs')
@@ -15,7 +15,7 @@ const quiet = () => {}
 const SCRATCH_PREFIX = 'fm-platform-sim-'
 const scratchDirs = () => new Set(readdirSync(tmpdir()).filter((n) => n.startsWith(SCRATCH_PREFIX)))
 
-// An empty home, no GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM=1, so the probes never read the
+// An empty home, no GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM and GIT_CONFIG_NOSYSTEM=1, so the probes never read the
 // user's or the host's git config (Git for Windows sets core.autocrlf=true system-wide). The temp dir is canonicalised so the plain run is plain on hosts whose temp dir is already
 // reached through a link (macOS /var -> /private/var).
 async function isolatedEnv(t) {
@@ -27,6 +27,9 @@ async function isolatedEnv(t) {
     TMPDIR: realTmp, TMP: realTmp, TEMP: realTmp, GIT_CONFIG_NOSYSTEM: '1',
   }
   delete env.GIT_CONFIG_GLOBAL
+  // The suite may itself run under the simulator (ci-local, a platformSim gate check), which sets
+  // GIT_CONFIG_SYSTEM; the probes here must not inherit it.
+  delete env.GIT_CONFIG_SYSTEM
   return { home, env }
 }
 
@@ -73,72 +76,67 @@ test('buildSimEnv points TMPDIR, TMP and TEMP at one symlinked path containing a
   assert.deepEqual(sim.skipped, [])
 })
 
-test('GIT_CONFIG_GLOBAL sets autocrlf and has no include when there was no previous global config', async (t) => {
+test('GIT_CONFIG_SYSTEM sets autocrlf and includes nothing when the system config was turned off', async (t) => {
   const { home, env } = await isolatedEnv(t)
-  const sim = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home })
+  const sim = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home, readSystemOrigins: () => { throw new Error('not consulted') } })
   t.after(() => sim.cleanup())
-  const text = await readFile(sim.env.GIT_CONFIG_GLOBAL, 'utf8')
+  const text = await readFile(sim.env.GIT_CONFIG_SYSTEM, 'utf8')
   assert.match(text, /autocrlf = true/)
   assert.doesNotMatch(text, /\[include\]/)
-})
-
-test('GIT_CONFIG_GLOBAL includes the previous ~/.gitconfig and git reads through it', async (t) => {
-  const { home, env } = await isolatedEnv(t)
-  const prev = path.join(home, '.gitconfig')
-  await writeFile(prev, '[user]\n\tname = Sim Probe\n')
-  const sim = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home })
-  t.after(() => sim.cleanup())
-  const text = await readFile(sim.env.GIT_CONFIG_GLOBAL, 'utf8')
-  assert.match(text, /\[include\]/)
-  assert.ok(text.includes(`path = ${JSON.stringify(prev)}`), text)
-  const name = spawnSync('git', ['config', '--global', '--includes', 'user.name'], { env: sim.env, encoding: 'utf8' })
-  assert.equal(name.stdout.trim(), 'Sim Probe')
-  const crlf = spawnSync('git', ['config', '--global', 'core.autocrlf'], { env: sim.env, encoding: 'utf8' })
+  assert.equal(sim.env.GIT_CONFIG_NOSYSTEM, undefined, 'git must read the simulated system file')
+  const crlf = spawnSync('git', ['config', 'core.autocrlf'], { env: sim.env, encoding: 'utf8' })
   assert.equal(crlf.stdout.trim(), 'true')
 })
 
-test('GIT_CONFIG_GLOBAL includes the XDG git config before ~/.gitconfig', async (t) => {
+test('GIT_CONFIG_SYSTEM includes a previous GIT_CONFIG_SYSTEM and git reads through it', async (t) => {
   const { home, env } = await isolatedEnv(t)
-  const xdg = path.join(env.XDG_CONFIG_HOME, 'git', 'config')
-  await mkdir(path.dirname(xdg), { recursive: true })
-  await writeFile(xdg, '[user]\n\tname = Xdg Probe\n')
-  const only = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home })
-  t.after(() => only.cleanup())
-  const onlyText = await readFile(only.env.GIT_CONFIG_GLOBAL, 'utf8')
-  assert.ok(onlyText.includes(`path = ${JSON.stringify(xdg)}`), onlyText)
-  const name = spawnSync('git', ['config', '--global', '--includes', 'user.name'], { env: only.env, encoding: 'utf8' })
-  assert.equal(name.stdout.trim(), 'Xdg Probe')
-
-  const dot = path.join(home, '.gitconfig')
-  await writeFile(dot, '[user]\n\tname = Dot Probe\n')
-  const both = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home })
-  t.after(() => both.cleanup())
-  const bothText = await readFile(both.env.GIT_CONFIG_GLOBAL, 'utf8')
-  const xi = bothText.indexOf(JSON.stringify(xdg))
-  const di = bothText.indexOf(JSON.stringify(dot))
-  assert.ok(xi >= 0 && di > xi, bothText)
-})
-
-// The simulator layers over the user's whole git setup; it leaves the system config alone.
-test('buildSimEnv neither sets GIT_CONFIG_NOSYSTEM nor drops GIT_CONFIG_SYSTEM', async (t) => {
-  const { home, env } = await isolatedEnv(t)
-  const baseEnv = { ...env, GIT_CONFIG_SYSTEM: path.join(home, 'system-gitconfig') }
+  const prev = path.join(home, 'system git.cfg')
+  await writeFile(prev, '[user]\n\tname = System Probe\n')
+  const baseEnv = { ...env, GIT_CONFIG_SYSTEM: prev }
   delete baseEnv.GIT_CONFIG_NOSYSTEM
   const sim = await buildSimEnv({ baseEnv, platform: 'linux', homedir: home })
   t.after(() => sim.cleanup())
-  assert.equal(sim.env.GIT_CONFIG_NOSYSTEM, undefined)
-  assert.equal(sim.env.GIT_CONFIG_SYSTEM, baseEnv.GIT_CONFIG_SYSTEM)
+  assert.notEqual(sim.env.GIT_CONFIG_SYSTEM, prev)
+  const text = await readFile(sim.env.GIT_CONFIG_SYSTEM, 'utf8')
+  assert.ok(text.includes(`path = ${JSON.stringify(prev)}`), text)
+  const name = spawnSync('git', ['config', '--system', '--includes', 'user.name'], { env: sim.env, encoding: 'utf8' })
+  assert.equal(name.stdout.trim(), 'System Probe')
 })
 
-test('GIT_CONFIG_GLOBAL includes a previous GIT_CONFIG_GLOBAL from the base env', async (t) => {
+test('GIT_CONFIG_SYSTEM includes the system config git reads by default', async (t) => {
   const { home, env } = await isolatedEnv(t)
-  const prev = path.join(home, 'custom global.cfg')
-  await writeFile(prev, '[user]\n\temail = sim@example.invalid\n')
-  const sim = await buildSimEnv({ baseEnv: { ...env, GIT_CONFIG_GLOBAL: prev }, platform: 'linux', homedir: home })
+  const etc = path.join(home, 'etc-gitconfig')
+  await writeFile(etc, '[user]\n\temail = etc@example.invalid\n')
+  const baseEnv = { ...env }
+  delete baseEnv.GIT_CONFIG_NOSYSTEM
+  const sim = await buildSimEnv({ baseEnv, platform: 'linux', homedir: home, readSystemOrigins: () => [etc, path.join(home, 'missing')] })
   t.after(() => sim.cleanup())
-  const text = await readFile(sim.env.GIT_CONFIG_GLOBAL, 'utf8')
-  assert.ok(text.includes(`path = ${JSON.stringify(prev)}`), text)
-  assert.notEqual(sim.env.GIT_CONFIG_GLOBAL, prev)
+  const text = await readFile(sim.env.GIT_CONFIG_SYSTEM, 'utf8')
+  assert.ok(text.includes(`path = ${JSON.stringify(etc)}`), text)
+  assert.ok(!text.includes('missing'), 'a file that does not exist is not included')
+})
+
+test('the global config is left alone: a fake HOME .gitconfig is still read, beside the simulated autocrlf', async (t) => {
+  const { home, env } = await isolatedEnv(t)
+  await writeFile(path.join(home, '.gitconfig'), '[user]\n\tname = Home Probe\n')
+  const sim = await buildSimEnv({ baseEnv: env, platform: 'linux', homedir: home })
+  t.after(() => sim.cleanup())
+  assert.equal(sim.env.GIT_CONFIG_GLOBAL, undefined)
+  const name = spawnSync('git', ['config', 'user.name'], { env: sim.env, encoding: 'utf8' })
+  assert.equal(name.stdout.trim(), 'Home Probe')
+  const crlf = spawnSync('git', ['config', 'core.autocrlf'], { env: sim.env, encoding: 'utf8' })
+  assert.equal(crlf.stdout.trim(), 'true')
+})
+
+test('defaultSystemOrigins names the system files git reads, and none when it reads none', async (t) => {
+  const { home, env } = await isolatedEnv(t)
+  const sys = path.join(home, 'sys.cfg')
+  await writeFile(sys, '[core]\n\tpager = cat\n')
+  const baseEnv = { ...env, GIT_CONFIG_SYSTEM: sys }
+  delete baseEnv.GIT_CONFIG_NOSYSTEM
+  assert.deepEqual(defaultSystemOrigins(baseEnv), [sys])
+  // A runner may ship a real system config, so the empty case names a file that does not exist.
+  assert.deepEqual(defaultSystemOrigins({ ...baseEnv, GIT_CONFIG_SYSTEM: path.join(home, 'none.cfg') }), [])
 })
 
 test('the scratch directory is gone after a passing run', async (t) => {
@@ -273,10 +271,10 @@ test('a cleanup failure after a spawn error still rejects with the spawn error',
 test('buildSimEnv removes its scratch directory when it fails after creating it', async (t) => {
   const { home, env } = await isolatedEnv(t)
   const before = scratchDirs()
-  // GIT_CONFIG_GLOBAL is read only after the scratch directory exists.
+  // The system config is read only after the scratch directory exists.
   const baseEnv = { ...env }
-  delete baseEnv.GIT_CONFIG_GLOBAL
-  Object.defineProperty(baseEnv, 'GIT_CONFIG_GLOBAL', { enumerable: true, get() { throw new Error('injected env failure') } })
+  delete baseEnv.GIT_CONFIG_NOSYSTEM
+  Object.defineProperty(baseEnv, 'GIT_CONFIG_NOSYSTEM', { enumerable: true, get() { throw new Error('injected env failure') } })
   await assert.rejects(buildSimEnv({ baseEnv, platform: 'linux', homedir: home }), /injected env failure/)
   assert.deepEqual([...scratchDirs()].filter((n) => !before.has(n)), [])
 })

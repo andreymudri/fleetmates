@@ -164,7 +164,7 @@ async function fixture(t, { review = false, command = nodeCommand('const fs=requ
   t.after(() => rm(root, { recursive: true, force: true }))
   if (typeof command === 'function') command = command(root)
   git(root, 'init', '-b', 'main')
-  // The integration's git drops every GIT_* variable, platform-sim's GIT_CONFIG_GLOBAL included,
+  // The integration's git drops every GIT_* variable, platform-sim's GIT_CONFIG_SYSTEM included,
   // so a checkout under the simulated autocrlf would read as dirty. Repository config is seen by both.
   git(root, 'config', 'core.autocrlf', 'false')
   git(root, 'config', 'user.name', 'Example')

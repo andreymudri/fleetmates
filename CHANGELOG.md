@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `ci-local` runs each job in an environment shaped like a fresh hosted runner by default: an
+  empty `HOME` and XDG directories, with the toolchain directories (mise, asdf, volta, rustup,
+  cargo, pyenv, nvm, bun, the npm cache) kept, and under `platform-sim` (symlinked temp dir with a
+  space, `core.autocrlf=true`, `umask 077`), with the workflow's `env` applied over both.
+  `--keep-home` and `--no-platform-sim` turn either off. Before this a test that read the
+  developer's own `~/.config` or assumed a canonical temp path passed `ci-local` and failed on the
+  runner.
+
 ## v2.7.0
 
 ### Added
