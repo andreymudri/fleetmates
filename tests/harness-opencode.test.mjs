@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
@@ -29,8 +29,9 @@ const { writeFileSync, fstatSync } = require('node:fs')
 const argv = process.argv.slice(2)
 // Measured: a non-TTY stdin is read to EOF and concatenated to the prompt, so the adapter must
 // hand the child /dev/null (stdio 'ignore'), never a pipe. A pipe here is a failed run.
-if (argv[0] === 'run' && fstatSync(0).isFIFO()) {
-  process.stdout.write(JSON.stringify({ type: 'error', timestamp: 0, sessionID: '', error: { type: 'unknown', message: 'stdin is a pipe' } }) + '\\n')
+// /dev/null is a character device; a node pipe is a socket, not a FIFO.
+if (argv[0] === 'run' && !fstatSync(0).isCharacterDevice()) {
+  process.stdout.write(JSON.stringify({ type: 'error', timestamp: 0, sessionID: '', error: { type: 'unknown', message: 'stdin is not /dev/null' } }) + '\\n')
   process.exit(1)
 }
 if (argv[0] === '--version') { process.stdout.write((process.env.FAKE_OC_VERSION || 'opencode v2.2.5') + '\\n'); process.exit(0) }
@@ -510,23 +511,32 @@ test('spawnOpenCode stops an oversized stream, counting what is already on disk,
   await writeFile(streamPath, 'p'.repeat(3000))
   await withEnv({ FAKE_OC_FLOOD: '1', FAKE_OC_FLOOD_CHUNK: '500' }, async () => {
     const handle = await spawnOpenCode({ sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'flood', streamPath, maxStreamBytes: 4096 })
-    const exited = once(handle.child, 'exit')
-    await handle.sessionId
-    const [, signal] = await exited
-    await handle.flushed
-    assert.equal(signal, 'SIGKILL')
-    assert.equal(handle.outputLimited, true)
-    assert.equal((await stat(streamPath)).size, 4096)
-    assert.equal((await readFile(streamPath, 'utf8')).slice(0, 3000), 'p'.repeat(3000))
+    try {
+      const exited = once(handle.child, 'exit')
+      await handle.sessionId
+      const [, signal] = await exited
+      await handle.flushed
+      assert.equal(signal, 'SIGKILL')
+      assert.equal(handle.outputLimited, true)
+      assert.equal((await stat(streamPath)).size, 4096)
+      assert.equal((await readFile(streamPath, 'utf8')).slice(0, 3000), 'p'.repeat(3000))
+    } finally {
+      // The fake floods forever: an adapter that fails to kill it must not leak it into the suite.
+      try { handle.child.kill('SIGKILL') } catch { /* already gone */ }
+    }
   })
 })
 
-test('readResult refuses a stream file larger than its bound, and never follows a symlink', async () => {
+// Only the symlink refusal is asserted here. A stream past `maxStreamBytes` is refused by the
+// bounded read, but a truncated read of NDJSON yields no parsable event either, so no assertion
+// through `readResult` can tell the refusal from the truncation: the write-side bound is what the
+// flood test above pins.
+test('readResult never follows a symlinked stream file, with or without O_NOFOLLOW', async () => {
   const streamPath = await streamWith([marker(), textEvent(JSON.stringify(good))])
   assert.deepEqual(await readResult({ streamPath }), good)
-  assert.equal(await readResult({ streamPath, maxStreamBytes: 8 }), null)
   const linked = path.join(path.dirname(streamPath), 'linked.jsonl')
-  await (await import('node:fs/promises')).symlink(streamPath, linked)
+  await symlink(streamPath, linked)
   assert.equal(await readResult({ streamPath: linked }), null)
+  // `noFollow: null` forces the path win32 takes, where O_NOFOLLOW is undefined.
   assert.equal(await readResult({ streamPath: linked, noFollow: null }), null)
 })

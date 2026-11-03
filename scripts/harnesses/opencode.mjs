@@ -55,7 +55,7 @@ function refuseEnforcement(sandbox, enforcement) {
 // A model reaches opencode as ONE argv element after `-m`, so it must be one bounded token; a
 // leading dash would read as a flag. Measured: the accepted form is `provider/model#variant`, so
 // `#` is part of the token. Refused, never repaired.
-const MODEL_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@+[\]-]{0,127}$/
+const MODEL_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/@+#[\]-]{0,127}$/
 
 function baseArgs({ model }) {
   if (model && (typeof model !== 'string' || !MODEL_TOKEN.test(model))) throw new Error('Invalid opencode model name')
@@ -206,7 +206,7 @@ function run(argv, { streamPath, errPath, cwd, env, append, maxStreamBytes = STR
   const take = (chunk) => {
     if (limited) return null
     const room = maxStreamBytes - written
-    { written += chunk.length; return chunk }
+    if (chunk.length <= room) { written += chunk.length; return chunk }
     limited = true
     written = maxStreamBytes
     return chunk.subarray(0, Math.max(0, room))
