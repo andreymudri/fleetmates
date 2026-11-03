@@ -17,6 +17,9 @@ const PRIVATE_TMP = mkdtempSync(path.join(tmpdir(), 'fm-ci-local-tmp-'))
 process.env.TMPDIR = process.env.TMP = process.env.TEMP = PRIVATE_TMP
 after(() => rmSync(PRIVATE_TMP, { recursive: true, force: true }))
 const POSIX = process.platform !== 'win32'
+// The runner label for this host. A test whose steps really run must name it: a job for another
+// OS runs nothing here, and ci-local then exits 3 instead of running the steps under test.
+const HOST_RUNNER = { linux: 'ubuntu-latest', darwin: 'macos-latest', win32: 'windows-latest' }[process.platform]
 
 async function repo(t, workflows) {
   const root = await mkdtemp(path.join(tmpdir(), 'fm-ci-local-'))
@@ -179,12 +182,10 @@ test('decideIf, evaluate, parseEnvFile and shellInvocation', () => {
 })
 
 test('with the user HOME, a real run carries GITHUB_ENV and GITHUB_PATH to the next step, and a git config --global write is undone after its step', { skip: !POSIX && 'bash steps' }, async (t) => {
-  // The job must name the host's own runner: this test runs its steps for real.
-  const runsOn = process.platform === 'darwin' ? 'macos-latest' : 'ubuntu-latest'
   const root = await repo(t, { 'ci.yml': `on: [push]
 jobs:
   a:
-    runs-on: ${runsOn}
+    runs-on: ${HOST_RUNNER}
     steps:
       - run: |
           echo "CARRIED=yes" >> "$GITHUB_ENV"
@@ -253,7 +254,7 @@ test('a real default run does not see the user config, leaves the user git confi
   const root = await repo(t, { 'ci.yml': `on: [push]
 jobs:
   a:
-    runs-on: ${process.platform === 'darwin' ? 'macos-latest' : 'ubuntu-latest'}
+    runs-on: ${HOST_RUNNER}
     steps:
       - run: |
           test ! -e "$HOME/.config/fm-tool/settings"
@@ -278,7 +279,7 @@ jobs:
 })
 
 test('cli ci-local --keep-home and --no-platform-sim each turn their part of the runner environment off', { skip: !POSIX && 'bash steps' }, async (t) => {
-  const root = await repo(t, { 'ci.yml': "on: [push]\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hi\n" })
+  const root = await repo(t, { 'ci.yml': `on: [push]\njobs:\n  a:\n    runs-on: ${HOST_RUNNER}\n    steps:\n      - run: echo hi\n` })
   const plainRun = spawnSync(process.execPath, [CLI, 'ci-local', '--keep-home', '--no-platform-sim', '--root', root], { encoding: 'utf8' })
   assert.equal(plainRun.status, 0, plainRun.stdout + plainRun.stderr)
   assert.match(plainRun.stdout, /runner environment: this shell, unchanged/)

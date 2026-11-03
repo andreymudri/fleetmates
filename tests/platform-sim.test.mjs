@@ -134,7 +134,8 @@ test('defaultSystemOrigins names the system files git reads, and none when it re
   await writeFile(sys, '[core]\n\tpager = cat\n')
   const baseEnv = { ...env, GIT_CONFIG_SYSTEM: sys }
   delete baseEnv.GIT_CONFIG_NOSYSTEM
-  assert.deepEqual(defaultSystemOrigins(baseEnv), [sys])
+  // git names the file with forward slashes on Windows.
+  assert.deepEqual(defaultSystemOrigins(baseEnv).map((f) => path.resolve(f)), [path.resolve(sys)])
   // A runner may ship a real system config, so the empty case names a file that does not exist.
   assert.deepEqual(defaultSystemOrigins({ ...baseEnv, GIT_CONFIG_SYSTEM: path.join(home, 'none.cfg') }), [])
 })
