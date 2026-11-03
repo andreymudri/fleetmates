@@ -1,14 +1,25 @@
-import { test } from 'node:test'
+import { test, after } from 'node:test'
+import { mkdtempSync, rmSync } from 'node:fs'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readFile, rm, realpath } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runLocalCi, decideIf, evaluate, parseEnvFile, shellInvocation } from '../scripts/ci-local.mjs'
+import { runLocalCi, decideIf, evaluate, parseEnvFile, shellInvocation, freshHomeEnv } from '../scripts/ci-local.mjs'
 
 const CLI = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'scripts', 'cli.mjs')
+
+// ci-local runs the platform simulator, which makes fm-platform-sim-* scratch directories in the
+// temp dir; platform-sim.test.mjs counts those in the shared one. This file gets its own, so the
+// two never race when the suite runs files in parallel.
+const PRIVATE_TMP = mkdtempSync(path.join(tmpdir(), 'fm-ci-local-tmp-'))
+process.env.TMPDIR = process.env.TMP = process.env.TEMP = PRIVATE_TMP
+after(() => rmSync(PRIVATE_TMP, { recursive: true, force: true }))
 const POSIX = process.platform !== 'win32'
+// The runner label for this host. A test whose steps really run must name it: a job for another
+// OS runs nothing here, and ci-local then exits 3 instead of running the steps under test.
+const HOST_RUNNER = { linux: 'ubuntu-latest', darwin: 'macos-latest', win32: 'windows-latest' }[process.platform]
 
 async function repo(t, workflows) {
   const root = await mkdtemp(path.join(tmpdir(), 'fm-ci-local-'))
@@ -31,6 +42,8 @@ function recorder(codes = {}) {
 
 const quiet = { write: () => {}, onOutput: () => {} }
 const linux = { platform: 'linux', ...quiet }
+// The user's own shell, unchanged: what the env and spawn assertions below are about.
+const plain = { keepHome: true, platformSim: false }
 
 const MATRIX = `on:
   push:
@@ -97,10 +110,10 @@ test('the macOS job runs on macOS, and matrix.os becomes the label that matched'
   assert.deepEqual(calls.map((c) => c.script.trim()), ['echo mac'])
 })
 
-test('env is workflow, then job, then step, and the user environment passes through unchanged', async (t) => {
+test('env is workflow, then job, then step, and with keepHome and no simulator the user environment passes through unchanged', async (t) => {
   const root = await repo(t, { 'ci.yml': MATRIX })
   const { calls, spawnFn } = recorder()
-  await runLocalCi(root, { ...linux, spawnFn, env: { PATH: '/usr/bin', GIT_CONFIG_GLOBAL: '/home/you/.gitconfig' } })
+  await runLocalCi(root, { ...linux, ...plain, spawnFn, env: { PATH: '/usr/bin', GIT_CONFIG_GLOBAL: '/home/you/.gitconfig' } })
   const env = calls[0].env
   assert.equal(env.LEVEL, 'workflow')
   assert.equal(env.SHARED, 'job')
@@ -150,7 +163,7 @@ test('a dry run lists what would run and spawns nothing', async (t) => {
 test('working-directory and a job default shell reach the spawn', async (t) => {
   const root = await repo(t, { 'ci.yml': "on: [pull_request]\njobs:\n  a:\n    runs-on: ubuntu-latest\n    defaults:\n      run:\n        shell: sh\n        working-directory: sub\n    steps:\n      - run: pwd\n      - run: pwd\n        shell: bash\n        working-directory: other\n" })
   const { calls, spawnFn } = recorder()
-  await runLocalCi(root, { ...linux, spawnFn })
+  await runLocalCi(root, { ...linux, ...plain, spawnFn })
   assert.deepEqual(calls.map((c) => [c.file, c.cwd]), [['sh', path.join(root, 'sub')], ['bash', path.join(root, 'other')]])
 })
 
@@ -168,13 +181,11 @@ test('decideIf, evaluate, parseEnvFile and shellInvocation', () => {
   assert.equal(shellInvocation('python', 'linux', 'f'), null)
 })
 
-test('a real run carries GITHUB_ENV and GITHUB_PATH to the next step, and a git config --global write is undone after its step', { skip: !POSIX && 'bash steps' }, async (t) => {
-  // The job must name the host's own runner: this test runs its steps for real.
-  const runsOn = process.platform === 'darwin' ? 'macos-latest' : 'ubuntu-latest'
+test('with the user HOME, a real run carries GITHUB_ENV and GITHUB_PATH to the next step, and a git config --global write is undone after its step', { skip: !POSIX && 'bash steps' }, async (t) => {
   const root = await repo(t, { 'ci.yml': `on: [push]
 jobs:
   a:
-    runs-on: ${runsOn}
+    runs-on: ${HOST_RUNNER}
     steps:
       - run: |
           echo "CARRIED=yes" >> "$GITHUB_ENV"
@@ -190,7 +201,7 @@ jobs:
   const userGlobal = path.join(root, 'user-gitconfig')
   await writeFile(userGlobal, '[fm]\n\tmark = kept\n[user]\n\tname = Someone\n')
   const out = []
-  const r = await runLocalCi(root, { platform: process.platform, env: { ...process.env, GIT_CONFIG_GLOBAL: userGlobal }, write: (l) => out.push(`${l}\n`), onOutput: (c) => out.push(String(c)) })
+  const r = await runLocalCi(root, { platform: process.platform, ...plain, env: { ...process.env, GIT_CONFIG_GLOBAL: userGlobal }, write: (l) => out.push(`${l}\n`), onOutput: (c) => out.push(String(c)) })
   assert.equal(r.code, 0, out.join(''))
   assert.equal(r.ran, 2)
   assert.equal(await readFile(userGlobal, 'utf8'), '[fm]\n\tmark = kept\n[user]\n\tname = Someone\n', 'the user global config is back as it was')
@@ -205,4 +216,75 @@ test('cli ci-local --dry-run lists the steps; a value on --dry-run is refused', 
   assert.match(r.stdout, /would run/)
   const bad = spawnSync(process.execPath, [CLI, 'ci-local', '--dry-run=yes', '--root', root], { encoding: 'utf8', env })
   assert.equal(bad.status, 2, bad.stdout + bad.stderr)
+})
+
+test('by default a job gets a fresh HOME and the platform simulator, and the workflow env still wins over them', async (t) => {
+  const root = await repo(t, { 'ci.yml': "on: [push]\njobs:\n  a:\n    runs-on: ubuntu-latest\n    env:\n      FROM_JOB: job\n    steps:\n      - run: echo 1\n      - run: echo 2\n        env:\n          TMP: from-step\n" })
+  const { calls, spawnFn } = recorder()
+  const lines = []
+  const r = await runLocalCi(root, { platform: 'linux', spawnFn, write: (l) => lines.push(l), onOutput: () => {}, env: { PATH: '/usr/bin', HOME: '/home/you', XDG_CONFIG_HOME: '/home/you/.config', GIT_CONFIG_GLOBAL: '/home/you/.gitconfig' } })
+  assert.equal(r.code, 0)
+  const env = calls[0].env
+  assert.notEqual(env.HOME, '/home/you')
+  assert.ok(env.XDG_CONFIG_HOME.startsWith(env.HOME), env.XDG_CONFIG_HOME)
+  assert.notEqual(env.GIT_CONFIG_GLOBAL, '/home/you/.gitconfig', 'the simulator owns the global git config')
+  assert.match(env.TMPDIR, /sim link/)
+  assert.equal(env.FROM_JOB, 'job')
+  assert.equal(calls[1].env.TMP, 'from-step', 'a step env overrides the simulated temp dir')
+  assert.equal(calls[0].env.HOME, calls[1].env.HOME, 'one HOME per job, kept across its steps')
+  assert.equal(calls[0].file, process.execPath, 'the umask trampoline runs the shell')
+  assert.ok(lines.some((l) => /runner environment: fresh HOME; platform-sim applied symlinked-tmpdir, space-in-tmpdir, autocrlf, umask-077/.test(l)), lines.join('\n'))
+})
+
+test('freshHomeEnv hides the user config and keeps the toolchain directories that exist', () => {
+  const real = '/home/you'
+  const exists = (p) => [path.join(real, '.local', 'share', 'mise'), path.join(real, '.npm'), path.join(real, '.cargo')].includes(p)
+  const env = freshHomeEnv({ HOME: real, PATH: '/bin', XDG_CONFIG_HOME: '/home/you/.config', GIT_CONFIG_GLOBAL: '/x', CARGO_HOME: '/opt/cargo' }, '/scratch/home', { exists })
+  assert.equal(env.HOME, '/scratch/home')
+  assert.equal(env.XDG_CONFIG_HOME, path.join('/scratch/home', '.config'))
+  assert.equal(env.GIT_CONFIG_GLOBAL, undefined)
+  assert.equal(env.MISE_DATA_DIR, path.join(real, '.local', 'share', 'mise'))
+  assert.equal(env.npm_config_cache, path.join(real, '.npm'))
+  assert.equal(env.CARGO_HOME, '/opt/cargo', 'a toolchain variable the user set is kept')
+  assert.equal(env.RUSTUP_HOME, undefined, 'a toolchain directory that does not exist is not invented')
+  assert.equal(env.PATH, '/bin')
+})
+
+test('a real default run does not see the user config, leaves the user git config alone and runs under the simulator', { skip: !POSIX && 'bash steps' }, async (t) => {
+  const root = await repo(t, { 'ci.yml': `on: [push]
+jobs:
+  a:
+    runs-on: ${HOST_RUNNER}
+    steps:
+      - run: |
+          test ! -e "$HOME/.config/fm-tool/settings"
+          git config --global user.name CI
+          test "$(git config user.name)" = CI
+          test "$(git config core.autocrlf)" = true
+          test "$(cd "$TMPDIR" && pwd -P)" != "$TMPDIR"
+          touch "$TMPDIR/probe" && test "$(ls -l "$TMPDIR/probe" | cut -c1-10)" = "-rw-------"
+` })
+  const userHome = path.join(root, 'user-home')
+  await mkdir(path.join(userHome, '.config', 'fm-tool'), { recursive: true })
+  await writeFile(path.join(userHome, '.config', 'fm-tool', 'settings'), 'mine\n')
+  const userGit = path.join(userHome, '.gitconfig')
+  await writeFile(userGit, '[user]\n\tname = Someone\n')
+  const out = []
+  const env = { ...process.env, HOME: userHome, XDG_CONFIG_HOME: path.join(userHome, '.config') }
+  delete env.GIT_CONFIG_GLOBAL
+  const r = await runLocalCi(root, { platform: process.platform, env, write: (l) => out.push(`${l}\n`), onOutput: (c) => out.push(String(c)) })
+  assert.equal(r.code, 0, out.join(''))
+  assert.equal(await readFile(userGit, 'utf8'), '[user]\n\tname = Someone\n')
+  assert.ok(!out.some((l) => l.includes('restored it')), 'nothing of the user was touched, so nothing needed restoring')
+})
+
+test('cli ci-local --keep-home and --no-platform-sim each turn their part of the runner environment off', { skip: !POSIX && 'bash steps' }, async (t) => {
+  const root = await repo(t, { 'ci.yml': `on: [push]\njobs:\n  a:\n    runs-on: ${HOST_RUNNER}\n    steps:\n      - run: echo hi\n` })
+  const plainRun = spawnSync(process.execPath, [CLI, 'ci-local', '--keep-home', '--no-platform-sim', '--root', root], { encoding: 'utf8' })
+  assert.equal(plainRun.status, 0, plainRun.stdout + plainRun.stderr)
+  assert.match(plainRun.stdout, /runner environment: this shell, unchanged/)
+  const simOnly = spawnSync(process.execPath, [CLI, 'ci-local', '--keep-home', '--root', root], { encoding: 'utf8' })
+  assert.match(simOnly.stdout, /runner environment: platform-sim applied/)
+  const homeOnly = spawnSync(process.execPath, [CLI, 'ci-local', '--no-platform-sim', '--root', root], { encoding: 'utf8' })
+  assert.match(homeOnly.stdout, /runner environment: fresh HOME\n/)
 })

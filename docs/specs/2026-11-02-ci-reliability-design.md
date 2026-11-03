@@ -50,9 +50,12 @@ Runs the command with:
 
 - `TMPDIR`, `TMP` and `TEMP` pointing at a directory reached through a symlink, whose path
   contains a space.
-- `GIT_CONFIG_GLOBAL` pointing at a generated file with `core.autocrlf=true`, layered over the
-  user's own global config through an `[include]` of it, so identity and signing settings keep
-  working.
+- `GIT_CONFIG_SYSTEM` pointing at a generated file with `core.autocrlf=true`, layered over the
+  user's own system config through an `[include]` of it. That is the level Git for Windows sets
+  autocrlf at on a Windows runner, and it leaves the global config alone, so identity and signing
+  settings keep working and a test that points git at a fake `HOME` still reads that `HOME`'s
+  `.gitconfig`. (Amended 2026-11-03: the first version used `GIT_CONFIG_GLOBAL`, which made git
+  ignore every `HOME`-based `.gitconfig` and failed a hub test that passes on every runner.)
 - `umask 077` on POSIX.
 
 It prints one line naming the conditions it applied, then the command's own output, and exits
