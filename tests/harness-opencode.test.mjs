@@ -646,7 +646,9 @@ test('dispatch tells the user the harness is experimental and what the configure
   const { runCli } = await import('../scripts/cli.mjs')
   await setFake({ text: JSON.stringify(good) })
   await withCliRepo(async ({ root, planPath, io, lines }) => {
-    await withEnv({ FAKE_OC_AUTH: 'anthropic' }, async () => {
+    // Its own config home: the probe needs one that exists, and a CI runner has no ~/.config/opencode.
+    const home = await freshDir('cli-home')
+    await withEnv({ FAKE_OC_AUTH: 'anthropic', OPENCODE_CONFIG_DIR: home, FLEETMATES_OPENCODE_MANAGED_DIR: path.join(home, 'absent') }, async () => {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       lines.length = 0
       // Default sandbox: the experimental and no-sandbox warnings, but not the `none` sentence.
