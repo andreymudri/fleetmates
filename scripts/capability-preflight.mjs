@@ -32,7 +32,8 @@ async function observe(capability, harness, env, exec) {
     return observation(capability, 'unavailable', 'No supported read-only Vault adapter is installed')
   }
   const [command, argv] = capability === 'harness'
-    ? (harness === 'codex' ? ['codex', ['login', 'status']] : ['cursor-agent', ['status']])
+    ? (harness === 'codex' ? ['codex', ['login', 'status']]
+      : harness === 'opencode' ? ['opencode', ['auth', 'list']] : ['cursor-agent', ['status']])
     : capability === 'render'
       ? [env.CHROMIUM_PATH || 'chromium', ['--version']]
       : ['gh', ['auth', 'status', '--active', '--hostname', 'github.com', '--json', 'hosts']]
@@ -40,7 +41,11 @@ async function observe(capability, harness, env, exec) {
   if (result.failure) return result.failure
   const output = result.output
   if (capability === 'harness') {
-    if (/not logged in/i.test(output)) return observation(capability, 'unavailable', 'Harness is not authenticated')
+    if (/not logged in/i.test(output)
+      // Measured on OpenCode 2.2.5: `opencode auth list` says this, and exits 0, with no credential.
+      || (harness === 'opencode' && /no authenticated integrations/i.test(output))) {
+      return observation(capability, 'unavailable', 'Harness is not authenticated')
+    }
     if (/^Logged in\b/im.test(output) || (harness === 'cursor' && /^✓ Logged in\b/im.test(output))) {
       return observation(capability, 'available', 'Authenticated harness status observed')
     }

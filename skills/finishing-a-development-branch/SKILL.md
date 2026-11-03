@@ -142,14 +142,19 @@ step after every phase's gate has passed again and before presenting the integra
 Before any push, run on this machine the CI steps this machine can run, so the remote CI confirms
 rather than discovers:
 
-    node "<fleetmates root>/scripts/cli.mjs" ci-local --root <project root> [--dry-run]
+    node "<fleetmates root>/scripts/cli.mjs" ci-local --root <project root> [--dry-run] [--keep-home] [--no-platform-sim]
 
 It reads the workflows that run on a branch push or a pull request, takes each job whose
 `runs-on` (or `matrix.os` list) is this operating system, and runs that job's `run:` steps in
 order, with the step's shell, its `env`, its `working-directory`, and `GITHUB_ENV` and
-`GITHUB_PATH` carried to the next step, in the user's own environment. A `git config --global`
-step (a CI identity, say) is undone after its step: the global git config files are put back as
-they were, and the run names each one it restored. What it cannot reproduce it
+`GITHUB_PATH` carried to the next step. Each job runs in an environment shaped like a fresh
+hosted runner rather than this shell: an empty `HOME` and XDG directories (the toolchain
+directories of mise, asdf, volta, rustup, cargo, pyenv, nvm and bun, and the npm cache, stay
+visible), and the platform simulator's symlinked temp dir, `core.autocrlf=true` and `umask 077`,
+with the workflow's own `env` applied over them. A test that passes only because of this
+machine's own config, or only on a canonical temp path, fails here instead of on the runner.
+`--keep-home` and `--no-platform-sim` turn either off; with the user's own `HOME`, a
+`git config --global` step is undone after its step and the run names each file it restored. What it cannot reproduce it
 skips and names: a `uses:` action, an expression other than `matrix.os`, `runner.os` and
 `runner.temp`, an `if:` other than a `runner.os` comparison, an unusual shell, and every job for
 another operating system. Those are what the remote CI is still for. Exit 0 means every step it

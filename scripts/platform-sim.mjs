@@ -1,7 +1,13 @@
 // Platform simulator: runs a command on a Linux or macOS machine under the conditions that most
 // often break code on other hosts. The temp dir is reached through a symlink whose path holds a
 // space, git checks out with core.autocrlf=true, and on POSIX the child runs under umask 077.
-import { spawn } from 'node:child_process'
+//
+// autocrlf is set at the SYSTEM level, through GIT_CONFIG_SYSTEM, which is where Git for Windows
+// sets it on a Windows runner. The user's own system config is included, and the global config
+// (~/.gitconfig, GIT_CONFIG_GLOBAL) is left alone, so a test that points git at a fake HOME still
+// reads it. A first version used GIT_CONFIG_GLOBAL, which made git ignore every HOME-based
+// .gitconfig and failed a hub test that passes on every real runner.
+import { spawn, execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -10,11 +16,11 @@ import path from 'node:path'
 export const SIM_CONDITIONS = ['symlinked-tmpdir', 'space-in-tmpdir', 'autocrlf', 'umask-077']
 
 const SCRATCH_PREFIX = 'fm-platform-sim-'
-const OVERRIDDEN = ['TMPDIR', 'TMP', 'TEMP', 'GIT_CONFIG_GLOBAL']
+const OVERRIDDEN = ['TMPDIR', 'TMP', 'TEMP', 'GIT_CONFIG_SYSTEM', 'GIT_CONFIG_NOSYSTEM']
 
 // Sets the umask for this process only, then runs the real command with inherited stdio.
 // process.argv after `node -e <code> --` is the command's own argv.
-const UMASK_TRAMPOLINE = `
+export const UMASK_TRAMPOLINE = `
 const { execFileSync } = require('node:child_process')
 const { constants } = require('node:os')
 process.umask(0o077)
@@ -29,12 +35,26 @@ try {
 }
 `
 
-// The global config files git reads when GIT_CONFIG_GLOBAL is unset, in the order it reads
-// them (a later file wins); or the one GIT_CONFIG_GLOBAL already names.
-function previousGlobalConfigs(baseEnv, homedir) {
-  if (baseEnv.GIT_CONFIG_GLOBAL) return existsSync(baseEnv.GIT_CONFIG_GLOBAL) ? [baseEnv.GIT_CONFIG_GLOBAL] : []
-  const xdgHome = baseEnv.XDG_CONFIG_HOME || path.join(homedir, '.config')
-  return [path.join(xdgHome, 'git', 'config'), path.join(homedir, '.gitconfig')].filter((p) => existsSync(p))
+// The system config files git reads under `baseEnv`, as `git config --system --show-origin`
+// names them; none when git cannot read one (there is none, or git is missing).
+export function defaultSystemOrigins(baseEnv) {
+  let out
+  try {
+    out = execFileSync('git', ['config', '--system', '--list', '--show-origin', '-z'], { env: baseEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+  } catch { return [] }
+  const files = []
+  for (const record of out.split('\0')) {
+    if (record.startsWith('file:') && !files.includes(record.slice(5))) files.push(record.slice(5))
+  }
+  return files
+}
+
+// The system config the simulated one must include: none when the user turned the system config
+// off (GIT_CONFIG_NOSYSTEM), the file GIT_CONFIG_SYSTEM names, or what git reads by default.
+function previousSystemConfigs(baseEnv, readSystemOrigins) {
+  if (baseEnv.GIT_CONFIG_NOSYSTEM && !/^(0|false|no|off)$/i.test(baseEnv.GIT_CONFIG_NOSYSTEM)) return []
+  if (baseEnv.GIT_CONFIG_SYSTEM) return existsSync(baseEnv.GIT_CONFIG_SYSTEM) ? [baseEnv.GIT_CONFIG_SYSTEM] : []
+  return readSystemOrigins(baseEnv).filter((p) => existsSync(p))
 }
 
 // JSON string quoting is valid git config quoting for a path: backslashes and double quotes
@@ -57,10 +77,12 @@ async function restoreWrite(dir) {
   for (const name of await readdir(dir)) await restoreWrite(path.join(dir, name))
 }
 
-// The system git config (GIT_CONFIG_SYSTEM, GIT_CONFIG_NOSYSTEM) passes through untouched: the
-// simulator layers its conditions over the user's whole git setup rather than replacing it.
-// symlinkImpl is a test seam; callers leave it at fs.symlink.
-export async function buildSimEnv({ baseEnv = process.env, platform = process.platform, homedir = os.homedir(), symlinkImpl = symlink } = {}) {
+// The global git config passes through untouched; the system config is replaced by a file that
+// includes it and adds autocrlf. GIT_CONFIG_NOSYSTEM is dropped so git reads that file; when the
+// user had set it, the file includes nothing, so their setup is unchanged but for autocrlf.
+// symlinkImpl and readSystemOrigins are test seams; `homedir` is unused and kept for callers.
+export async function buildSimEnv({ baseEnv = process.env, platform = process.platform, homedir = os.homedir(), symlinkImpl = symlink, readSystemOrigins = defaultSystemOrigins } = {}) {
+  void homedir
   const realBase = await realpath(os.tmpdir())
   const scratch = await mkdtemp(path.join(realBase, SCRATCH_PREFIX))
   const cleanup = async () => {
@@ -90,7 +112,7 @@ export async function buildSimEnv({ baseEnv = process.env, platform = process.pl
     applied.push('space-in-tmpdir')
 
     const gitConfig = path.join(scratch, 'gitconfig')
-    await writeFile(gitConfig, gitConfigText(previousGlobalConfigs(baseEnv, homedir)))
+    await writeFile(gitConfig, gitConfigText(previousSystemConfigs(baseEnv, readSystemOrigins)))
     applied.push('autocrlf')
 
     if (platform === 'win32') skipped.push({ name: 'umask-077', reason: 'Windows has no umask' })
@@ -100,7 +122,7 @@ export async function buildSimEnv({ baseEnv = process.env, platform = process.pl
     for (const [k, v] of Object.entries(baseEnv)) {
       if (!OVERRIDDEN.includes(k.toUpperCase())) env[k] = v
     }
-    Object.assign(env, { TMPDIR: simTmp, TMP: simTmp, TEMP: simTmp, GIT_CONFIG_GLOBAL: gitConfig })
+    Object.assign(env, { TMPDIR: simTmp, TMP: simTmp, TEMP: simTmp, GIT_CONFIG_SYSTEM: gitConfig })
     return { env, applied, skipped, cleanup }
   } catch (err) {
     await cleanup()

@@ -25,7 +25,7 @@ import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks, revie
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
-  GATE_FILE, LOCAL_FILE, ROLES,
+  GATE_FILE, LOCAL_FILE, ROLES, EXPERIMENTAL_HARNESSES,
 } from './config.mjs'
 import * as configModule from './config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
@@ -130,9 +130,13 @@ function sandboxRefusal(dir) {
 function resolveHarness(flags, io) {
   const name = (flags.harness === undefined || flags.harness === true) ? 'codex' : flags.harness
   if (!HARNESS_NAMES.includes(name)) {
-    io.out(`unknown harness: ${printable(String(name))} (known: ${HARNESS_NAMES.join(', ')})`)
+    io.out(`unknown harness: ${printable(String(name))} (known: ${HARNESS_NAMES.join(', ')}`
+      + `; experimental: ${EXPERIMENTAL_HARNESSES.join(', ')})`)
     return null
   }
+  // An experimental harness is named as such wherever it is selected, not only in its own probe:
+  // nothing about it has been measured end to end.
+  if (EXPERIMENTAL_HARNESSES.includes(name)) io.out(`warning: harness ${name} is experimental`)
   return getAdapter(name)
 }
 
@@ -212,7 +216,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   platform-sim [--root <path>] -- <command...>
   flaky    [--report <path>] [--root <path>] -- <command...>
   ci-wait  --branch <name> [--minutes <1-720>] [--root <path>]
-  ci-local [--dry-run] [--root <path>]
+  ci-local [--dry-run] [--keep-home] [--no-platform-sim] [--root <path>]
   config   list [--root <path>]
   config   get <key> [--root <path>]
   config   set <key> <value> [--root <path>] [--local]
@@ -650,7 +654,7 @@ export const KNOWN_FLAGS = {
   'platform-sim': [],
   flaky: ['report'],
   'ci-wait': ['branch', 'minutes'],
-  'ci-local': ['dry-run'],
+  'ci-local': ['dry-run', 'keep-home', 'no-platform-sim'],
   // Forwarded to hub/bin/fleetmates-deck.mjs; forwardDeck narrows these per deck subcommand.
   ui: [],
   deck: ['dry-run', 'rotate-token'],
@@ -4662,11 +4666,13 @@ export async function runCli(argv, io = { out: console.log }) {
     const selected = explicitSelection(flags, adapter, io)
     if (selected === SELECTION_REJECTED) return 2
 
-    const probe = await adapter.probe({})
+    // The probe is told the sandbox this dispatch will actually use, so a harness whose warning
+    // depends on it (OpenCode's opt-in `none`) can say so before anything is spawned.
+    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    const probe = await adapter.probe({ sandboxMode })
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
     if (probe.warning) io.out(`warning: ${probe.warning}`)
 
-    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     try {
       for (const task of phaseTasks) {
         const file = path.join(runDir(root, runId), 'sessions', `${task.id}.json`)
@@ -4788,7 +4794,9 @@ export async function runCli(argv, io = { out: console.log }) {
     if (code !== 0) { io.out(captured.join('\n')); return code }
     const spec = JSON.parse(captured.join('\n'))
 
-    const probe = await adapter.probe({})
+    // Reviewers run in the repository itself, so the probe is told `full` rather than the
+    // implementers' configured sandbox.
+    const probe = await adapter.probe({ sandboxMode: prerequisites?.enforcement ? 'clone' : 'full' })
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
     if (probe.warning) io.out(`warning: ${probe.warning}`)
 
@@ -4877,7 +4885,9 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!resolved) return 2
     const adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
-    const probe = await adapter.probe({})
+    // The integrator always works in a checkout of the run branch: `full`, never the implementers'
+    // configured sandbox.
+    const probe = await adapter.probe({ sandboxMode: 'full' })
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
     if (probe.warning) io.out(`warning: ${probe.warning}`)
 
@@ -7595,12 +7605,20 @@ export async function runCli(argv, io = { out: console.log }) {
     }
   }
 
-  // `ci-local [--dry-run]`: runs, from the project root, the CI workflow steps this OS can run
-  // (scripts/ci-local.mjs). Exit 0 every step it ran passed, 1 a step failed, 3 nothing runs here.
+  // `ci-local [--dry-run] [--keep-home] [--no-platform-sim]`: runs, from the project root, the CI
+  // workflow steps this OS can run (scripts/ci-local.mjs), by default with a fresh HOME and under
+  // the platform simulator. Exit 0 every step it ran passed, 1 a step failed, 3 nothing runs here.
   // `--dry-run` lists what would run and what is skipped, and runs nothing.
   if (command === 'ci-local') {
-    if (flags['dry-run'] !== undefined && flags['dry-run'] !== true) { io.out(`--dry-run takes no value\n\n${USAGE}`); return 2 }
-    const { code } = await runLocalCi(root, { dryRun: flags['dry-run'] === true, write: (line) => io.out(printable(line)) })
+    for (const flag of ['dry-run', 'keep-home', 'no-platform-sim']) {
+      if (flags[flag] !== undefined && flags[flag] !== true) { io.out(`--${flag} takes no value\n\n${USAGE}`); return 2 }
+    }
+    const { code } = await runLocalCi(root, {
+      dryRun: flags['dry-run'] === true,
+      keepHome: flags['keep-home'] === true,
+      platformSim: flags['no-platform-sim'] !== true,
+      write: (line) => io.out(printable(line)),
+    })
     return code
   }
 
