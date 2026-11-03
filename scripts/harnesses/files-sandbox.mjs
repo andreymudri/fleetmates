@@ -36,6 +36,11 @@ export const CONTROL_PATHS = [
   '.claude/settings.json',
   '.claude/settings.local.json',
   '.vscode',
+  // OpenCode reads plugins, MCP servers, agents and permission rules from `opencode.json` and
+  // `.opencode/` at the project root: a teammate that plants one there runs its code in the next
+  // `opencode run`, inside the next teammate's turn.
+  '.opencode',
+  'opencode.json',
 ]
 
 // The directories that contain control paths. A teammate that replaces one with a symlink or a

@@ -330,6 +330,17 @@ Cursor teammates always run in a git-less `files` checkout with the sandbox enab
 rules, platforms and model mapping are covered in
 [docs/reference/harnesses.md](docs/reference/harnesses.md#running-on-cursor).
 
+### Running on DeepSeek
+
+The whole fleet, orchestrator included, can run on DeepSeek models with no adapter: point Claude
+Code at DeepSeek's Anthropic-compatible endpoint.
+
+    export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
+    export ANTHROPIC_AUTH_TOKEN=<your DeepSeek API key>
+
+The tier mapping, a measured run against Claude and the limits are covered in
+[docs/reference/deepseek.md](docs/reference/deepseek.md).
+
 ### Execution, recovery and diagnostics
 
 The event ledger, hook diagnostics (`doctor --hooks`), reviewer outcome reports and the bounded
