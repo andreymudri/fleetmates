@@ -169,10 +169,12 @@ test('decideIf, evaluate, parseEnvFile and shellInvocation', () => {
 })
 
 test('a real run carries GITHUB_ENV and GITHUB_PATH to the next step, and a git config --global write is undone after its step', { skip: !POSIX && 'bash steps' }, async (t) => {
+  // The job must name the host's own runner: this test runs its steps for real.
+  const runsOn = process.platform === 'darwin' ? 'macos-latest' : 'ubuntu-latest'
   const root = await repo(t, { 'ci.yml': `on: [push]
 jobs:
   a:
-    runs-on: ubuntu-latest
+    runs-on: ${runsOn}
     steps:
       - run: |
           echo "CARRIED=yes" >> "$GITHUB_ENV"
