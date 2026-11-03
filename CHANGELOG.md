@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.7.0
+
+### Added
+
+- Platform simulator. `cli.mjs platform-sim -- <command...>` runs a command with `TMPDIR`, `TMP`
+  and `TEMP` reached through a symlink whose path holds a space, `GIT_CONFIG_GLOBAL` setting
+  `core.autocrlf=true` over the user's own global config, and `umask 077` on POSIX, prints one
+  `platform-sim: applied ...` line and exits with the command's code. On Windows the symlink and
+  umask conditions are skipped and named. A gate `command` check with `"platformSim": true` runs
+  under it instead of plainly.
+- Flaky detector. `cli.mjs flaky [--report <path>] -- <command...>` retries a failing command
+  exactly once; with a JUnit report it retries only the failed tests for node:test, vitest, jest and
+  pytest. A pass on the retry exits 0, prints `flaky: <id>` per test (ids are
+  `<file>::<classname>::<name>`) and records the test in the tracked `fleetmates.flaky.json`, which
+  is in the protected set and is written only from the main worktree or under `GITHUB_ACTIONS=true`.
+  A run is excused only when every failed test passed on the retry or is already quarantined, and
+  an excused run prints the exit code it overrode; a command without a report that fails twice is
+  always red. Under GitHub Actions it prints `::warning` annotations and a step summary table. A
+  gate `command` check with `"flaky": true` runs through it, retrying the whole command. A malformed
+  quarantine file is refused with exit 2.
+- `portability` review lens, added by `review-dispatch` and expected by `collect-reviews` when a
+  workflow under `.github/workflows` runs on macOS or Windows.
+- `doctor` prints a `CI:` section warning when no workflow runs on a pushed run branch, when the CI
+  matrix covers one operating system that `package.json` does not restrict the package to, and when
+  no workflow step runs the flaky detector, and suggests removing a quarantined test after 20 passes
+  in a row.
+- `cli.mjs ci-wait --branch <name> [--minutes <1-720>]` polls the branch tip's GitHub Actions
+  workflow runs through `gh api` every 30 seconds. It exits 0 when every run concluded `success` or
+  `skipped` (or the tip has no workflows, printing `no CI workflows: skipped`), 1 when one failed, 3
+  when runs are still pending at the deadline and 4 when `gh` cannot read them. It never pushes.
+  `finishing-a-development-branch` gains a `Remote CI` step that pushes the run branch, asking first
+  unless `ci.push` is `auto`, waits through `ci-wait`, and does not offer the merge while CI is red,
+  pending or unreadable.
+- Config keys `ci.push` (`ask` or `auto`, default `ask`) and `ci.waitMinutes` (1 to 720, default
+  60), accepted by `config set` in either layer.
+- `cli.mjs ci-local [--dry-run]` mirrors the remote CI on this machine: it runs, in order, the
+  `run:` steps of every job in a push or pull request workflow whose runner is this OS, with the
+  step's shell, env and working directory and `GITHUB_ENV`/`GITHUB_PATH` carried between steps,
+  and stops at the first failure (exit 1). It skips and names `uses:` actions, other OSes, and the
+  expressions and `if:` conditions it cannot evaluate; exit 3 when nothing runs here. A global
+  git config file a step changes is restored after that step, and the run names it. The
+  `finishing-a-development-branch` Remote CI step runs it before any push.
+
+### Fixed
+
+- The flaky detector read a `>` inside a quoted report attribute, such as a file path, as the end
+  of the testcase tag, so the test did not match its quarantine entry.
+- The integrator replay tool's scratch clone pins `core.autocrlf=false`, so a global
+  `core.autocrlf=true` no longer checks the replayed files out as CRLF and fails a faithful session.
+
 ## v2.6.0
 
 ### Added
