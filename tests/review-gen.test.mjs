@@ -687,3 +687,46 @@ test('the method defines what a finding is and how to rate it', () => {
   assert.match(prompt, /an unpinned claim about an enforcement or security guarantee is high/)
   assert.match(prompt, /A descriptive comment that has merely drifted from the code is low/)
 })
+
+// The portability lens: a checklist of macOS and Windows failure classes. Each entry names one
+// spec checklist item, so dropping any single line of the prompt fails here by name.
+const PORTABILITY_ITEMS = [
+  ['realpath and symlinked ancestors', /realpath/i, /symlinked ancestor/i],
+  ['8.3 short names', /8\.3 short name/i],
+  ['path separators', /path separator/i],
+  ['path length', /path length/i],
+  ['line endings', /line ending/i],
+  ['hidden files', /hidden file/i],
+  ['read-only files', /read-only file/i],
+  ['socket paths', /socket path/i],
+  ['signals', /signal/i],
+  ['process groups', /process group/i],
+  ['shell: true quoting', /`shell: true`/, /quot/i],
+  ['fixed sleeps', /fixed sleep/i],
+  ['polling windows', /polling window/i],
+]
+
+test('the portability prompt names every checklist item of the spec', () => {
+  const build = methodFor(LENS_METHODS, 'portability')
+  assert.equal(typeof build, 'function')
+  const prompt = build()
+  for (const [item, ...patterns] of PORTABILITY_ITEMS) {
+    for (const p of patterns) assert.match(prompt, p, `portability prompt is missing: ${item}`)
+  }
+})
+
+test('the portability prompt asks for file:line and rates a hazard on a CI platform high', () => {
+  const build = methodFor(LENS_METHODS, 'portability')
+  assert.equal(typeof build, 'function')
+  const prompt = build()
+  assert.match(prompt, /file:line/)
+  assert.match(prompt, /platform the project's CI runs[^\n]*\bhigh\b/)
+})
+
+test('a dispatch for the portability lens carries that prompt', () => {
+  const build = methodFor(LENS_METHODS, 'portability')
+  assert.equal(typeof build, 'function')
+  const prompt = generateReviewDispatch({ ...BASE, lenses: ['portability'] }).reviewers[0].prompt
+  assert.ok(prompt.endsWith(`\n${build()}`))
+  assert.match(prompt, /8\.3 short name/i)
+})

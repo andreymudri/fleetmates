@@ -1675,9 +1675,16 @@ test('the store watches the user file and swaps in a valid edit', async () => {
   const store = createTiersStore({ file: s.file, watch: true, debounceMs: 10 })
   try {
     const swapped = new Promise(resolve => store.onChange(resolve))
-    s.write({ version: 1, entries: [{ id: 'caution.user.watched', tier: 'caution', tool: 'Bash', cmd: 'watched' }] })
-    const tiers = await Promise.race([swapped, new Promise((resolve, reject) => setTimeout(() => reject(new Error('no change seen')), 5000))])
-    assert.ok(tiers.entries.some(entry => entry.id === 'caution.user.watched'))
+    // macOS FSEvents can drop a change made right after the watch starts, so the edit is repeated
+    // until one is seen. Without the watcher none ever is, and the test still fails.
+    const edit = () => s.write({ version: 1, entries: [{ id: 'caution.user.watched', tier: 'caution', tool: 'Bash', cmd: 'watched' }] })
+    edit()
+    const again = setInterval(edit, 250)
+    let timeout
+    try {
+      const tiers = await Promise.race([swapped, new Promise((resolve, reject) => { timeout = setTimeout(() => reject(new Error('no change seen')), 5000) })])
+      assert.ok(tiers.entries.some(entry => entry.id === 'caution.user.watched'))
+    } finally { clearInterval(again); clearTimeout(timeout) }
   } finally { store.close(); s.close() }
 })
 
