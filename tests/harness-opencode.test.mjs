@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, rm, writeFile, readFile, chmod, stat, symlink, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { once } from 'node:events'
@@ -73,7 +73,8 @@ before(async () => {
   await chmod(bin, 0o755)
   originalPath = process.env.PATH
   process.env.PATH = `${pathDir}${path.delimiter}${originalPath}`
-  scratch = await mkdtemp(path.join(tmpdir(), 'fm-opencode-scratch-'))
+  // realpath: macOS's tmpdir is a /var symlink to /private/var, and the fake reports its real cwd.
+  scratch = await realpath(await mkdtemp(path.join(tmpdir(), 'fm-opencode-scratch-')))
 })
 
 after(async () => {
