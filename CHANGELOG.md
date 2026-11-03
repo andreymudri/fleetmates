@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## v2.8.0
+
+### Added
+
+- An OpenCode harness (`--harness opencode`), EXPERIMENTAL: built on facts measured against
+  OpenCode 2.2.5 (`@opencode/cli`), but its successful-turn path has never run, because every
+  measurement was taken on a free tier that refuses the first model call. If the real event shape
+  differs, a working turn is reported as orphaned. OpenCode has no operating system sandbox, so
+  the only layout is a git-less checkout the host commits from (`sandbox: "files"`, with the
+  opt-in `"none"`), the child gets an allowlisted environment, and concurrent OpenCode teammates
+  are not isolated from each other. Every dispatch prints these limits.
+- `docs/reference/deepseek.md`: running the whole fleet on DeepSeek through its
+  Anthropic-compatible endpoint, with no adapter.
 
 ### Changed
 
@@ -11,6 +23,11 @@
   `--keep-home` and `--no-platform-sim` turn either off. Before this a test that read the
   developer's own `~/.config` or assumed a canonical temp path passed `ci-local` and failed on the
   runner.
+- `platform-sim` sets `core.autocrlf=true` through `GIT_CONFIG_SYSTEM`, including the user's
+  own system config, instead of `GIT_CONFIG_GLOBAL`. That is the level Git for Windows sets it at
+  on a runner, and it leaves the global config alone: the global override made git ignore every
+  `HOME`-based `.gitconfig`, so a test that points git at a fake `HOME` failed under the simulator
+  and passed on every runner.
 
 ## v2.7.0
 
