@@ -1,5 +1,6 @@
 import { LEGACY, NAMES } from './names.mjs'
 import { normalizePath } from './enforce.mjs'
+import { QUARANTINE_FILE } from './flaky.mjs'
 import { readFile } from 'node:fs/promises'
 import { availableParallelism } from 'node:os'
 import path from 'node:path'
@@ -95,10 +96,26 @@ export function previewLinks(config) {
 export const ENFORCEMENT_CHECK_KINDS = ['fileset', 'ownership']
 
 // The gate manifest is always protected, under both names: the current one is what the gate
-// reads, and the legacy one is what a later migration would adopt. `protected` only adds.
+// reads, and the legacy one is what a later migration would adopt. The flaky quarantine is
+// protected with it, so a teammate cannot quarantine its own failing test. `protected` only adds.
 export function protectedPaths(config) {
   const extra = Array.isArray(config?.protected) ? config.protected : []
-  return [...new Set([NAMES.gateFile, LEGACY.gateFile, ...extra].map(normalizePath))]
+  return [...new Set([NAMES.gateFile, LEGACY.gateFile, QUARANTINE_FILE, ...extra].map(normalizePath))]
+}
+
+const PORTABILITY_LENS = 'portability'
+const PORTABILITY_OSES = ['macos', 'windows']
+
+// The lenses of the phase's review (`agent`) check, plus `portability` when the project's CI runs
+// on macOS or Windows. `summary` is `workflowSummary` from scripts/ci-workflows.mjs; a lens the
+// manifest already lists is kept once. A phase with no review check has no lenses to dispatch.
+export function reviewLenses(config, phaseName, summary) {
+  const review = checksForPhase(config, phaseName).find((check) => check?.kind === 'agent')
+  if (!review) return []
+  const lenses = [...new Set(review.lens)]
+  const oses = summary?.oses instanceof Set ? summary.oses : new Set(Array.isArray(summary?.oses) ? summary.oses : [])
+  if (PORTABILITY_OSES.some((os) => oses.has(os)) && !lenses.includes(PORTABILITY_LENS)) lenses.push(PORTABILITY_LENS)
+  return lenses
 }
 
 // `fileset` and `ownership` are injected when the phase's list lacks them. The manifest the gate

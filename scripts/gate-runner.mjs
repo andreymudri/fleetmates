@@ -2,7 +2,7 @@ import { NAMES } from './names.mjs'
 import { commandOutcome } from './verifier-profile.mjs'
 import { runTestChangePolicy } from './test-change-policy.mjs'
 import { createCommandLog } from './command-log.mjs'
-import { spawn } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
 import { writeFileSync, unlinkSync } from 'node:fs'
 import { mkdtemp, rm, lstat, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -14,6 +14,7 @@ import { GitError } from './git.mjs'
 import { lintCommittedInstructions } from './security-lint.mjs'
 import { protectedPaths } from './gate-config.mjs'
 import { withMergePreview, conflictPairs, previewClaimPath } from './merge-preview.mjs'
+import { runFlaky } from './flaky.mjs'
 
 // 15 minutes. A command check is the project's own suite, so the default has to clear a
 // slow one on a cold cache; what it exists to stop is the check that never returns at all.
@@ -552,7 +553,7 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
   // caller can pass a shape the manifest path already rejected. Throwing lands as
   // `check threw:` in the list, which is a stated failure rather than a default applied
   // behind the caller's back.
-  const fault = timeoutFault(check)
+  const fault = timeoutFault(check) ?? reliabilityFault(check)
   if (fault) throw new Error(fault)
   const claims = []
   // No preview means no claim to hold: a solo run's checks stand in the repository itself,
@@ -593,16 +594,20 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
   let streamed = false
   try {
     log = await createCommandLog({ maxBytes: logMaxBytes })
-    const { code, output, timedOut = false, outputLimited = false } = await exec(check.run, cwd, {
+    const execOptions = {
       timeoutMs: check.timeoutMs ?? COMMAND_TIMEOUT_MS,
       onSpawn,
       onOutput: chunk => { streamed = true; log.write(chunk) },
       maxCaptureBytes: 64 * 1024,
       ...(contract ? { env: contract.env } : {}),
-    })
+    }
+    const run = check.platformSim === true || check.flaky === true
+      ? await runReliably(check, { cwd, previewDir, exec, contract, execOptions, writeLog: chunk => log.write(chunk) })
+      : { ...await exec(check.run, cwd, execOptions), buffered: true }
+    const { code, output, timedOut = false, outputLimited = false } = run
     // Buffered custom executors remain supported. The default executor streams
     // raw bytes before decoding or reducing the diagnostic tail.
-    if (!streamed && exec !== defaultExec) log.write(Buffer.from(output))
+    if (run.buffered && !streamed && exec !== defaultExec) log.write(Buffer.from(output))
     const evidence = log.finish({ complete: !timedOut && !outputLimited })
     const passed = code === 0 && !timedOut && !outputLimited && evidence.complete
     const summary = commandSummary(output)
@@ -612,9 +617,15 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
       status: passed ? 'pass' : 'fail',
       exitCode: code,
       outcome: commandOutcome({ code, timedOut }),
-      output: passed ? '' : summary + (evidence.complete ? '' : '\nCommand output evidence is incomplete; inspect the retained log.'),
+      // The flaky detector's own lines are kept on a pass too: a test that passed only on its
+      // retry is green, but not silent.
+      output: passed ? (run.flakyLines ?? []).join('') : summary + (evidence.complete ? '' : '\nCommand output evidence is incomplete; inspect the retained log.'),
       log: evidence,
       optional: check.optional === true,
+    }
+    if (check.flaky === true) {
+      result.flaky = run.flaky
+      result.quarantinedFailures = run.quarantinedFailures
     }
     // Read whatever the exit code: a failing suite still has an inventory. Kept off `output`, which
     // is what a person reads; the inventory is what `runChecks` compares.
@@ -631,6 +642,153 @@ export async function runCommandCheck(check, { cwd = process.cwd(), previewDir =
     for (const claim of claims) {
       try { unlinkSync(claim) } catch { /* already gone */ }
     }
+  }
+}
+
+// The CI reliability flags of a `command` check (docs/specs/2026-11-02-ci-reliability-design.md).
+// Read off a file any teammate can write, so a value that is not a boolean is a fault, never a
+// default: `"flaky": "yes"` must not read as either setting.
+export function reliabilityFault(check) {
+  for (const flag of ['platformSim', 'flaky']) {
+    const value = check?.[flag]
+    if (value !== undefined && typeof value !== 'boolean') return `${flag} must be true or false, got ${JSON.stringify(value)}`
+  }
+  return null
+}
+
+// One attempt under scripts/platform-sim.mjs, in a node child that the gate's `exec` spawns with
+// the same options as a plain check: the timeout, the process-group kill and the log are tested on
+// this path (tests/gate-ci-reliability.test.mjs); the preview claim rides the same `onSpawn` and
+// is not separately tested here. It ignores SIGTERM so that, when the timeout signals the group,
+// it outlives the command long enough to remove the simulator's scratch directory.
+//
+// Its one argument is a `shellCommand`-shaped spec as JSON. `runPlatformSim` spawns with node's
+// ordinary argv quoting, which cmd.exe does not read back, so a spec that needs
+// `windowsVerbatimArguments` is run here instead: the same simulator environment from
+// `buildSimEnv`, spawned with the flag. That path does not apply the umask (on win32 the simulator
+// skips it anyway), and it says so in its `applied` line.
+const SIM_TRAMPOLINE = `
+const { runPlatformSim, buildSimEnv } = await import(${JSON.stringify(new URL('./platform-sim.mjs', import.meta.url).href)})
+const { spawn } = await import('node:child_process')
+process.on('SIGTERM', () => {})
+const spec = JSON.parse(process.argv[1])
+const onOutput = (chunk) => process.stdout.write(chunk)
+async function runVerbatim() {
+  const sim = await buildSimEnv()
+  try {
+    const code = await new Promise((resolve, reject) => {
+      const child = spawn(spec.file, spec.args, { cwd: process.cwd(), env: sim.env, stdio: ['ignore', 'pipe', 'pipe'], windowsVerbatimArguments: true, windowsHide: true })
+      child.stdout.on('data', onOutput)
+      child.stderr.on('data', onOutput)
+      child.on('error', reject)
+      child.on('close', (status) => resolve(typeof status === 'number' ? status : 1))
+    })
+    const applied = sim.applied.filter((name) => name !== 'umask-077')
+    const skipped = sim.skipped.concat(sim.applied.includes('umask-077') ? [{ name: 'umask-077', reason: 'not applied to a verbatim shell command' }] : [])
+    return { code, applied, skipped }
+  } finally {
+    try { await sim.cleanup() } catch (err) { onOutput('platform-sim: could not remove the scratch directory: ' + err.message + '\\n') }
+  }
+}
+let r
+try {
+  r = spec.windowsVerbatimArguments
+    ? await runVerbatim()
+    : await runPlatformSim([spec.file, ...spec.args], { cwd: process.cwd(), onOutput })
+} catch (err) {
+  onOutput('platform-sim: could not run the command: ' + err.message + '\\n')
+  process.exit(127)
+}
+const skipped = r.skipped.map((s) => s.name + ' (' + s.reason + ')')
+onOutput('platform-sim: applied ' + r.applied.join(', ') + (skipped.length ? '; skipped ' + skipped.join('; ') : '') + '\\n')
+process.exitCode = r.code
+`
+
+// The node argv that runs one simulated attempt of `spec` (`{ file, args, windowsVerbatimArguments }`).
+export function simAttemptArgv(spec) {
+  return ['--input-type=module', '-e', SIM_TRAMPOLINE, '--', JSON.stringify(spec)]
+}
+
+// The check's `run` string as a spawn spec for the flaky detector and the simulator, which spawn
+// without a shell: the platform shell, invoked the way node's own `shell: true` invokes it. On
+// win32 that is `cmd.exe /d /s /c "<run>"` with `windowsVerbatimArguments`, because cmd.exe does
+// not undo the backslash escaping node's ordinary argv quoting puts on a double quote.
+export function shellCommand(run, { platform = process.platform, comspec = process.env.ComSpec } = {}) {
+  return platform === 'win32'
+    ? { file: comspec || 'cmd.exe', args: ['/d', '/s', '/c', `"${run}"`], windowsVerbatimArguments: true }
+    : { file: '/bin/sh', args: ['-c', run], windowsVerbatimArguments: false }
+}
+
+// Whether `dir` is the top level of a repository's main worktree, the only place the gate writes
+// the tracked quarantine file. A linked worktree is a teammate's, and outside git there is no
+// tracked file to write.
+async function isMainWorktree(dir) {
+  const stdout = await new Promise((resolve) => {
+    execFile('git', ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir', '--git-common-dir'], { cwd: dir, windowsHide: true }, (err, out) => resolve(err ? null : out))
+  })
+  if (stdout === null) return false
+  const [top, gitDir, common] = stdout.split(/\r?\n/)
+  if (!top || !gitDir || !common) return false
+  const real = (p) => realpath(p).catch(() => path.resolve(p))
+  return (await real(top)) === (await real(dir)) && (await real(gitDir)) === (await real(common))
+}
+
+// A `command` check with `platformSim` and/or `flaky` set. Every attempt goes through the gate's
+// own `exec` with the same options, and the attempts share ONE deadline: the check's timeout
+// bounds the whole check, and an attempt that timed out is not retried.
+//
+// Known limit: the flaky detector filters a retry by test name only when it can read the runner
+// off argv, and a gate check reaches it as `<shell> -c <run>`, so the retry is the whole command.
+async function runReliably(check, { cwd, previewDir, exec, contract, execOptions, writeLog }) {
+  const deadline = Date.now() + execOptions.timeoutMs
+  const outputs = []
+  let timedOut = false
+  let outputLimited = false
+  const shell = shellCommand(check.run)
+  // The array the flaky detector sees. Handed back unchanged (the whole-command retry), it means
+  // `shell`, verbatim flag included; any other argv is a plain command.
+  const shellForm = [shell.file, ...shell.args]
+  const attempt = async (argv) => {
+    if (timedOut || outputLimited) return { code: 1 }
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      timedOut = true
+      outputs.push('\n— the check timeout ran out before the retry could start')
+      return { code: 1 }
+    }
+    const options = { ...execOptions, timeoutMs: remaining }
+    const spec = argv === shellForm ? shell : { file: argv[0], args: argv.slice(1), windowsVerbatimArguments: false }
+    const r = check.platformSim === true
+      ? await exec(process.execPath, cwd, { ...options, argv: simAttemptArgv(spec) })
+      : argv === shellForm
+        ? await exec(check.run, cwd, options)
+        : await exec(argv[0], cwd, { ...options, argv: argv.slice(1) })
+    outputs.push(r.output ?? '')
+    if (r.timedOut) timedOut = true
+    if (r.outputLimited) outputLimited = true
+    return { code: r.code }
+  }
+  if (check.flaky !== true) {
+    const { code } = await attempt(shellForm)
+    return { code, output: outputs.join(''), timedOut, outputLimited }
+  }
+  const flakyLines = []
+  const r = await runFlaky(shellForm, {
+    root: cwd,
+    cwd,
+    report: contract && !contract.refused ? contract.target : null,
+    canWrite: previewDir === null && await isMainWorktree(cwd),
+    exec: (argv) => attempt(argv),
+    write: (text) => { flakyLines.push(text); writeLog(Buffer.from(text)) },
+  })
+  return {
+    code: r.code,
+    output: outputs.join('') + flakyLines.join(''),
+    timedOut,
+    outputLimited,
+    flaky: r.flaky,
+    quarantinedFailures: r.quarantinedFailures,
+    flakyLines,
   }
 }
 
@@ -1968,7 +2126,7 @@ async function runCheckList(checks, ctx, commandCwd, mergeConflicted, previewDir
     // phase that does not merge is exactly where it would otherwise go unreported until the
     // conflict was fixed and the check finally ran.
     if (check.kind === 'command') {
-      const fault = timeoutFault(check)
+      const fault = timeoutFault(check) ?? reliabilityFault(check)
       if (fault) { results.push(malformedTimeoutResult(check, manifestPosition(ctx, index), fault)); continue }
     }
     // A `command` check exists to answer "does the integrated tree work". Without a merged
