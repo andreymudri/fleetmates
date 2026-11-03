@@ -2,7 +2,7 @@ name: deck
 
 on:
   push:
-    branches: [master]
+    branches: ['**']
   pull_request:
 
 jobs:
@@ -36,4 +36,4 @@ jobs:
       - run: npm --prefix hub run build
       - name: Check platform regressions before the full suite
         run: node --test --test-name-pattern='null-device timestamps|JSON body type|oversized streamed|confirmed read stays|confirming read starts|renamed Node init' hub/test/unit/tiers.test.mjs hub/test/integration/security.test.mjs hub/test/unit/http-body-limit.test.mjs hub/test/unit/setup.test.mjs
-      - run: npm --prefix hub test
+      - run: node scripts/cli.mjs flaky -- npm --prefix hub test

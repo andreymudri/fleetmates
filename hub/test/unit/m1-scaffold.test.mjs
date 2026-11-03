@@ -109,7 +109,7 @@ test('deck CI declares pinned Node, build, and tests on Linux, macOS and Windows
   const version = (await readFile(path.join(hub, '.node-version'), 'utf8')).trim()
   const workflow = await readFile(path.join(root, '.github/workflows/deck.yml'), 'utf8')
   assert.match(version, /^24\.\d+\.\d+$/)
-  assert.match(workflow, /^on:\n  push:\n    branches: \[master\]\n  pull_request:\n\njobs:/m)
+  assert.match(workflow, /^on:\n  push:\n    branches: \['\*\*'\]\n  pull_request:\n\njobs:/m)
   const hubJob = workflow.split(/^  hub:\s*$/m)[1]?.split(/^  [\w-]+:\s*$/m)[0]
   assert.ok(hubJob)
   assert.match(hubJob, /^      matrix:\n        os: \[ubuntu-latest, macos-latest, windows-latest\]\n    runs-on: \$\{\{ matrix\.os \}\}$/m)
@@ -129,7 +129,7 @@ test('deck CI declares pinned Node, build, and tests on Linux, macOS and Windows
     '      - run: npm --prefix hub run build',
     '      - name: Check platform regressions before the full suite',
     "        run: node --test --test-name-pattern='null-device timestamps|JSON body type|oversized streamed|confirmed read stays|confirming read starts|renamed Node init' hub/test/unit/tiers.test.mjs hub/test/integration/security.test.mjs hub/test/unit/http-body-limit.test.mjs hub/test/unit/setup.test.mjs",
-    '      - run: npm --prefix hub test',
+    '      - run: node scripts/cli.mjs flaky -- npm --prefix hub test',
   ].join('\n'))
   assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?if:/m)
   assert.doesNotMatch(hubJob, /^\s+(?:-\s+)?continue-on-error:/m)

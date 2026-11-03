@@ -2198,7 +2198,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 124, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 141, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2398,10 +2398,22 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **143 lines: 124 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **160 lines: 141 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **10 sites in `cli.mjs`**, the watchdog's `watch` and `rescue`
+// The most recent move was **17 sites in `cli.mjs`**, the CI reliability commands.
+// `windowsCommandArgv`'s batch-shim refusal (the argv command and the unsafe argument). `doctor`'s
+// CI section: the `ciAdvice` line, the skipped-workflow line (a workflow path and reason), the
+// unreadable-quarantine line and the release suggestion (a test id out of `fleetmates.flaky.json`).
+// `platform-sim`'s could-not-run line and `flaky`'s could-not-run and malformed-quarantine lines.
+// `ci-wait`'s bad `--minutes` refusal, no-branch refusal, start line (the `--branch` value), the
+// could-not-list-workflows line (git's error text for the tip's tree), the `gh`-could-not-run and
+// `gh api`-exited lines (gh's own error text), the unreadable-response line, the failed line
+// (workflow name, conclusion and run URL off GitHub) and the still-pending names.
+// Driven by `tests/ci-reliability-cli.test.mjs` for their exit codes and wording; none is
+// row-driven here.
+//
+// The move before that was **10 sites in `cli.mjs`**, the watchdog's `watch` and `rescue`
 // commands. `watch`: the unreadable-plan refusal (the `--plan` value and the parse error), the
 // no-run-directory refusal (the run id), the config-failure line, the lock-held refusal (the lock
 // path), and `onAction`'s ledger-failure `watch-error` event. `rescue`: the no-registered-worktree
