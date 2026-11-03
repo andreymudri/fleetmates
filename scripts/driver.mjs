@@ -222,6 +222,21 @@ async function stderrTail(errPath, bytes = 2000) {
   }
 }
 
+// An adapter that can name why a turn produced nothing (OpenCode reports a provider error as a
+// stdout event, not on stderr, so `stderrTail` is empty for it) gets to supply the orphan reason.
+// `readError` is optional: an adapter without it, or one that throws, changes nothing.
+async function safeErrorReason(adapter, paths) {
+  if (typeof adapter.readError !== 'function') return ''
+  try {
+    const error = await adapter.readError({ streamPath: paths.streamPath })
+    if (!error || typeof error.type !== 'string') return ''
+    const retry = Number.isSafeInteger(error.retryAfterMs) && error.retryAfterMs > 0 ? ` (retry after ${error.retryAfterMs} ms)` : ''
+    return `${error.type}${error.message ? `: ${error.message}` : ''}${retry}`.slice(0, 2000)
+  } catch {
+    return ''
+  }
+}
+
 async function safeUsage(adapter, streamPath) {
   try {
     return await adapter.readUsage({ streamPath })
@@ -801,7 +816,7 @@ export async function dispatchPhase({
     await handle.flushed
 
     let result = await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })
-    if (!validateResult(result)) return orphan((await stderrTail(paths.errPath)) || 'no result')
+    if (!validateResult(result)) return orphan((await safeErrorReason(adapter, paths)) || (await stderrTail(paths.errPath)) || 'no result')
 
     await adapter.collect(git, { runRepo, sandbox, branch })
     const reset = await refuseResetTip(result)
@@ -822,7 +837,7 @@ export async function dispatchPhase({
       if (reason2 === 'timeout') return orphan('timeout')
       await h2.flushed
       const reread = await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })
-      if (!validateResult(reread)) return orphan('no current valid result after resume')
+      if (!validateResult(reread)) return orphan((await safeErrorReason(adapter, paths)) || 'no current valid result after resume')
       result = reread
       await adapter.collect(git, { runRepo, sandbox, branch })
       const resetAgain = await refuseResetTip(result)

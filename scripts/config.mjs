@@ -10,7 +10,12 @@ export const LOCAL_FILE = NAMES.localFile
 export const CAVEMAN_LEVELS = ['lite', 'full', 'ultra']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const SANDBOXES = ['clone', 'files', 'full']
+// `opencode` is EXPERIMENTAL: no part of its successful-turn path has ever been executed (there was
+// no paid credential to measure it with), and OpenCode has no operating system sandbox at all. Its
+// `probe` repeats both on every dispatch. See
+// docs/specs/2026-11-02-headless-driver-opencode-design.md.
 export const KNOWN_HARNESSES = ['codex', 'cursor', 'opencode']
+export const EXPERIMENTAL_HARNESSES = ['opencode']
 // The sandboxes each harness may run teammates in. Cursor runs git outside its own sandbox, so
 // only its git-less `files` checkout is safe (docs/specs/2026-09-16-headless-driver-cursor-design.md §2).
 // OpenCode has no operating system sandbox at all: `files` is the git-less checkout plus the deny

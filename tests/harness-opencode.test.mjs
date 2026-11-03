@@ -7,7 +7,7 @@ import { once } from 'node:events'
 import { defaultGitExec } from '../scripts/git.mjs'
 import { getAdapter, HARNESS_NAMES } from '../scripts/harnesses/index.mjs'
 import {
-  buildSpawnArgv, buildResumeArgv, assertSafeArgv, configContent, childEnv, spawnOpenCode,
+  buildSpawnArgv, buildResumeArgv, assertSafeArgv, configContent, childEnv, policyMode, spawnOpenCode,
   resumeOpenCode, readResult, readError, readUsage, probe, makeOpenCodeSandbox, collectOpenCode,
   cleanup, opencodeAdapter, opencodeCheckoutRoot, RESULT_INSTRUCTION, TURN_MARKER, MEASURED_VERSION,
   FILES_PREAMBLE,
@@ -17,16 +17,22 @@ import {
 const WIN32_FAKE_SKIP = process.platform === 'win32' ? 'shebang fake binaries do not execute on win32' : false
 
 // A fake `opencode` on PATH, replaying the shapes measured in
-// docs/specs/2026-11-02-headless-driver-opencode-design.md §1. It:
-//  - answers `--version` from FAKE_OC_VERSION (default the measured one) and `auth list` from
-//    FAKE_OC_AUTH;
-//  - writes its argv, cwd and the OPENCODE_* environment it received to FAKE_OC_ARGV_OUT;
-//  - FAILS if anything is piped on its stdin, so an adapter that sends the prompt there is caught;
+// docs/specs/2026-11-02-headless-driver-opencode-design.md §1. A `run` is steered by `fake.json`
+// NEXT TO THE BINARY, not by the environment: the adapter hands the child an allowlisted
+// environment (review finding I2), so a fake that read its instructions from `FAKE_OC_*` would be
+// testing nothing once the allowlist works. `--version` and `auth list` are probe commands, which
+// get the caller's environment, so those two still read it. The fake:
+//  - FAILS if anything but /dev/null is on its stdin, so an adapter that sends the prompt there is
+//    caught;
+//  - writes its argv, cwd and the environment it received to `fake.json`'s `argvOut`;
 //  - emits an early error line whose `sessionID` is EMPTY, then the real session id, then a plain
-//    text line that is not JSON, then a `text` part holding FAKE_OC_TEXT and a `step_finish`.
+//    text line that is not JSON, then a `text` part holding `text` and a `step_finish`.
 const FAKE_SRC = `#!/usr/bin/env node
-const { writeFileSync, fstatSync } = require('node:fs')
+const { writeFileSync, readFileSync, fstatSync } = require('node:fs')
+const { join, dirname } = require('node:path')
 const argv = process.argv.slice(2)
+let ctl = {}
+try { ctl = JSON.parse(readFileSync(join(dirname(process.argv[1]), 'fake.json'), 'utf8')) } catch {}
 // Measured: a non-TTY stdin is read to EOF and concatenated to the prompt, so the adapter must
 // hand the child /dev/null (stdio 'ignore'), never a pipe. A pipe here is a failed run.
 // /dev/null is a character device; a node pipe is a socket, not a FIFO.
@@ -39,26 +45,18 @@ if (argv[0] === 'auth') {
   process.stdout.write((process.env.FAKE_OC_AUTH || 'No authenticated integrations') + '\\n')
   process.exit(Number(process.env.FAKE_OC_AUTH_CODE || 0))
 }
-if (process.env.FAKE_OC_ARGV_OUT) {
-  const env = {}
-  for (const key of Object.keys(process.env)) if (key.startsWith('OPENCODE_')) env[key] = process.env[key]
-  writeFileSync(process.env.FAKE_OC_ARGV_OUT, JSON.stringify({ argv, env, cwd: process.cwd() }))
-}
+if (ctl.argvOut) writeFileSync(ctl.argvOut, JSON.stringify({ argv, env: { ...process.env }, cwd: process.cwd() }))
 const w = (o) => process.stdout.write(JSON.stringify(o) + '\\n')
-const sessionID = process.env.FAKE_OC_SESSION || 'ses_fake1'
-if (process.env.FAKE_OC_FLOOD === '1') {
+const sessionID = ctl.session || 'ses_fake1'
+if (ctl.flood) {
   w({ type: 'step_start', timestamp: 1, sessionID, part: { type: 'step-start' } })
-  setInterval(() => process.stdout.write('x'.repeat(Number(process.env.FAKE_OC_FLOOD_CHUNK || 65536))), 1)
-} else if (process.env.FAKE_OC_ERROR) {
-  w({ type: 'error', timestamp: 1, sessionID: '', error: { type: 'unknown', message: 'early' } })
-  w({ type: 'error', timestamp: 2, sessionID, error: { type: process.env.FAKE_OC_ERROR, message: 'boom', status: 429, retryAfterMs: 1000 } })
-  process.exit(1)
+  setInterval(() => process.stdout.write('x'.repeat(Number(ctl.floodChunk || 65536))), 1)
 } else {
   // An early error with no session id, exactly as measured: the id must come from a later line.
   w({ type: 'error', timestamp: 1, sessionID: '', error: { type: 'unknown', message: 'ignored by the id reader' } })
   w({ type: 'step_start', timestamp: 2, sessionID, part: { type: 'step-start' } })
   process.stdout.write('plain text on stdout, not JSON\\n')
-  w({ type: 'text', timestamp: 3, sessionID, part: { type: 'text', text: process.env.FAKE_OC_TEXT || '' } })
+  w({ type: 'text', timestamp: 3, sessionID, part: { type: 'text', text: ctl.text || '' } })
   w({ type: 'step_finish', timestamp: 4, sessionID, part: { type: 'step-finish', tokens: { input: 10, output: 5, reasoning: 1, cache: { read: 2, write: 3 } } } })
   process.exit(0)
 }
@@ -96,6 +94,10 @@ async function withEnv(vars, fn) {
     }
   }
 }
+
+// Steers the next `run` of the fake. Written next to the binary, not into the environment, which
+// the adapter's allowlist strips.
+const setFake = (control = {}) => writeFile(path.join(pathDir, 'fake.json'), JSON.stringify(control))
 
 const good = { status: 'done', branch: 'fleetmates/r1/T1', filesChanged: ['a.txt'], summary: 'ok', blockers: [] }
 
@@ -196,16 +198,68 @@ test('network: true lifts only the fetch denies, and "none" drops every rule', (
   assert.deepEqual(none, { snapshot: false })
 })
 
-test('childEnv disables the teammate-writable config layers in a checkout and keeps them in full', () => {
-  const checkout = childEnv({ mode: 'files', network: false, env: {} })
-  assert.equal(checkout.OPENCODE_CONFIG_CONTENT, configContent({ mode: 'files', network: false }))
-  assert.equal(checkout.OPENCODE_DISABLE_AUTOUPDATE, '1')
-  assert.equal(checkout.OPENCODE_DISABLE_PROJECT_CONFIG, '1')
-  assert.equal(checkout.OPENCODE_DISABLE_CLAUDE_CODE, '1')
-  const full = childEnv({ mode: 'full', network: false, env: {} })
-  assert.equal(full.OPENCODE_DISABLE_PROJECT_CONFIG, undefined)
-  assert.equal(full.OPENCODE_DISABLE_CLAUDE_CODE, undefined)
-  assert.deepEqual(JSON.parse(full.OPENCODE_CONFIG_CONTENT), { snapshot: false })
+// Review finding B1: `dispatch-reviews` and `dispatch-integrator` build a `full` sandbox on the
+// real repository themselves, without `makeSandbox`. That path used to get `{"snapshot":false}` —
+// the `none` policy — with no opt-in anywhere. Only the git denies may be missing there.
+test('a full sandbox keeps external_directory and the fetch denies, and drops only the git denies', () => {
+  const full = JSON.parse(configContent({ mode: 'full', network: false }))
+  assert.equal(full.snapshot, false)
+  assert.equal(full.permission.external_directory, 'deny')
+  assert.equal(full.permission.webfetch, 'deny')
+  assert.equal(full.permission.websearch, 'deny')
+  assert.equal(full.permission.bash, undefined, 'the integrator has to be able to commit')
+  assert.equal(JSON.parse(configContent({ mode: 'full', network: true })).permission.webfetch, undefined)
+  // ...and it is not the weak mode, which is the only policy-free one.
+  assert.notDeepEqual(full, JSON.parse(configContent({ mode: 'none', network: false })))
+})
+
+test('childEnv disables the teammate-writable config layers in every mode, full included', () => {
+  for (const mode of ['files', 'none', 'full']) {
+    const out = childEnv({ mode, network: false, env: {} })
+    assert.equal(out.OPENCODE_CONFIG_CONTENT, configContent({ mode, network: false }), mode)
+    assert.equal(out.OPENCODE_DISABLE_AUTOUPDATE, '1', mode)
+    assert.equal(out.OPENCODE_DISABLE_PROJECT_CONFIG, '1', mode)
+    assert.equal(out.OPENCODE_DISABLE_CLAUDE_CODE, '1', mode)
+  }
+})
+
+// Review finding I2: the whole host environment used to reach the teammate's shell, credentials,
+// GIT_DIR and the OPENCODE_CONFIG layer included.
+test('childEnv is an allowlist: credentials, GIT_*, foreign OPENCODE_* and the host PWD never reach the child', () => {
+  const host = {
+    PATH: '/bin', HOME: '/home/you', TMPDIR: '/tmp', LANG: 'C.UTF-8', TERM: 'xterm',
+    XDG_CACHE_HOME: '/c', OPENCODE_CONFIG_DIR: '/cfg',
+    GH_TOKEN: 'secret', GITHUB_TOKEN: 'secret', ANTHROPIC_API_KEY: 'secret', AWS_SECRET_ACCESS_KEY: 'secret',
+    SSH_AUTH_SOCK: '/run/ssh', GIT_DIR: '/run/repo/.git', GIT_WORK_TREE: '/run/repo',
+    GIT_CONFIG_GLOBAL: '/home/you/.gitconfig', PWD: '/run/repo', OLDPWD: '/run',
+    OPENCODE_CONFIG: '/tmp/evil.json', OPENCODE_PERMISSION: '{"bash":"allow"}',
+    OPENCODE_DISABLE_PROJECT_CONFIG: '0',
+  }
+  const out = childEnv({ mode: 'files', network: false, env: host, cwd: '/checkout/T1' })
+  for (const key of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'TERM', 'XDG_CACHE_HOME', 'OPENCODE_CONFIG_DIR']) {
+    assert.equal(out[key], host[key], key)
+  }
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'ANTHROPIC_API_KEY', 'AWS_SECRET_ACCESS_KEY', 'SSH_AUTH_SOCK',
+    'GIT_DIR', 'GIT_WORK_TREE', 'GIT_CONFIG_GLOBAL', 'OLDPWD', 'OPENCODE_CONFIG', 'OPENCODE_PERMISSION']) {
+    assert.equal(out[key], undefined, key)
+  }
+  // The host's PWD named the run repository; the child's names its own workspace.
+  assert.equal(out.PWD, '/checkout/T1')
+  // A host value cannot flip the adapter's own switches.
+  assert.equal(out.OPENCODE_DISABLE_PROJECT_CONFIG, '1')
+})
+
+// Review finding I3: `meta.mode` is the string driver.mjs and brief.mjs read; the opt-in weak mode
+// must not travel in it, or a fix round silently drops the previous round's commit.
+test('the weak mode travels in meta.rules, never in meta.mode, and an unknown mode is refused', () => {
+  assert.equal(policyMode({ meta: { mode: 'files' } }), 'files')
+  assert.equal(policyMode({ meta: { mode: 'full' } }), 'full')
+  assert.equal(policyMode({ meta: { mode: 'files', rules: 'none' } }), 'none')
+  for (const meta of [{ mode: 'clone' }, { mode: 'none' }, {}]) {
+    assert.throws(() => policyMode({ meta }), /cannot run in a/, JSON.stringify(meta))
+    assert.throws(() => buildSpawnArgv({ sandbox: { cwd: '/w', meta }, prompt: 'p' }), /cannot run in a/)
+    assert.throws(() => buildResumeArgv({ sandbox: { cwd: '/w', meta }, sessionId: 'ses_1', message: 'm' }), /cannot run in a/)
+  }
 })
 
 // --- spawn / resume -------------------------------------------------------------------------
@@ -218,13 +272,12 @@ test('spawn scrubs the checkout, sends the prompt in argv with a closed stdin, a
   const sessions = await freshDir('sessions')
   const argvOut = path.join(sessions, 'argv.json')
   const sandbox = { cwd, meta: { mode: 'files' } }
-  await withEnv({ FAKE_OC_ARGV_OUT: argvOut, FAKE_OC_SESSION: 'ses_42', FAKE_OC_TEXT: JSON.stringify(good) }, async () => {
-    const handle = await spawnOpenCode({
-      sandbox, prompt: 'do it', model: 'anthropic/x', network: false,
-      streamPath: path.join(sessions, 's.jsonl'), errPath: path.join(sessions, 'e.log'),
-    })
-    assert.equal(await runToExit(handle), 'ses_42')
+  await setFake({ argvOut, session: 'ses_42', text: JSON.stringify(good) })
+  const handle = await spawnOpenCode({
+    sandbox, prompt: 'do it', model: 'anthropic/x', network: false,
+    streamPath: path.join(sessions, 's.jsonl'), errPath: path.join(sessions, 'e.log'),
   })
+  assert.equal(await runToExit(handle), 'ses_42')
   await assert.rejects(stat(path.join(cwd, '.opencode', 'plugin.js')), /ENOENT/)
   await assert.rejects(stat(path.join(cwd, 'opencode.json')), /ENOENT/)
   const seen = JSON.parse(await readFile(argvOut, 'utf8'))
@@ -243,11 +296,10 @@ test('resume continues the recorded session, appends to the stream, and re-scrub
   const streamPath = path.join(sessions, 's.jsonl')
   const argvOut = path.join(sessions, 'argv.json')
   const sandbox = { cwd, meta: { mode: 'files' } }
-  await withEnv({ FAKE_OC_ARGV_OUT: argvOut, FAKE_OC_TEXT: JSON.stringify(good) }, async () => {
-    await runToExit(await spawnOpenCode({ sandbox, prompt: 'p', network: false, streamPath }))
-    await writeFile(path.join(cwd, 'opencode.json'), '{"plugin":["./evil.js"]}')
-    await runToExit(await resumeOpenCode({ sandbox, sessionId: 'ses_fake1', message: 'again', network: false, streamPath }))
-  })
+  await setFake({ argvOut, text: JSON.stringify(good) })
+  await runToExit(await spawnOpenCode({ sandbox, prompt: 'p', network: false, streamPath }))
+  await writeFile(path.join(cwd, 'opencode.json'), '{"plugin":["./evil.js"]}')
+  await runToExit(await resumeOpenCode({ sandbox, sessionId: 'ses_fake1', message: 'again', network: false, streamPath }))
   await assert.rejects(stat(path.join(cwd, 'opencode.json')), /ENOENT/)
   const seen = JSON.parse(await readFile(argvOut, 'utf8'))
   assert.deepEqual(seen.argv.slice(0, 7), ['run', '--standalone', '--format', 'json', '--auto', '-s', 'ses_fake1'])
@@ -261,11 +313,10 @@ test('a full sandbox is neither scrubbed nor sent the files instruction', { time
   await writeFile(path.join(cwd, 'opencode.json'), '{"user":true}')
   const sessions = await freshDir('sessions')
   const argvOut = path.join(sessions, 'argv.json')
-  await withEnv({ FAKE_OC_ARGV_OUT: argvOut, FAKE_OC_TEXT: JSON.stringify(good) }, async () => {
-    await runToExit(await spawnOpenCode({
-      sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'p', network: false, streamPath: path.join(sessions, 's.jsonl'),
-    }))
-  })
+  await setFake({ argvOut, text: JSON.stringify(good) })
+  await runToExit(await spawnOpenCode({
+    sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'p', network: false, streamPath: path.join(sessions, 's.jsonl'),
+  }))
   const seen = JSON.parse(await readFile(argvOut, 'utf8'))
   assert.equal(seen.argv[seen.argv.length - 1], 'p')
   assert.equal(await readFile(path.join(cwd, 'opencode.json'), 'utf8'), '{"user":true}')
@@ -347,7 +398,10 @@ test('makeOpenCodeSandbox refuses clone and full, and puts the checkout outside 
   }
   const cache = await freshDir('cache')
   const sandbox = await makeOpenCodeSandbox(defaultGitExec, { runRepo, runBranch: 'main', runId: 'r1', taskId: 'T1', mode: 'none', env: { XDG_CACHE_HOME: cache } })
-  assert.equal(sandbox.meta.mode, 'none')
+  // The weak mode is `meta.rules`; `meta.mode` stays the shared `files` the driver reads (I3).
+  assert.equal(sandbox.meta.mode, 'files')
+  assert.equal(sandbox.meta.rules, 'none')
+  assert.equal(policyMode(sandbox), 'none')
   assert.ok(sandbox.cwd.startsWith(opencodeCheckoutRoot({ runRepo, runId: 'r1', env: { XDG_CACHE_HOME: cache } })))
   assert.ok(!sandbox.cwd.startsWith(runRepo))
   assert.equal(await readFile(path.join(sandbox.cwd, 'base.txt'), 'utf8'), 'base\n')
@@ -423,12 +477,25 @@ test('cleanup removes the checkout and its empty run and repo directories, but k
 
 // --- probe ------------------------------------------------------------------------------------
 
-test('probe: an authenticated measured version is ok, and still warns that there is no sandbox', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
+test('probe: an authenticated measured version is ok, and still warns about everything that is not enforced', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
   const home = await freshDir('home')
   const res = await probe({ env: { ...process.env, OPENCODE_CONFIG_DIR: home, FAKE_OC_AUTH: 'anthropic', FLEETMATES_OPENCODE_MANAGED_DIR: path.join(home, 'absent') } })
   assert.equal(res.ok, true)
+  // Each of these is a claim the spec makes about what the user is told before any turn runs.
+  assert.match(res.warning, /EXPERIMENTAL/)
   assert.match(res.warning, /no operating system sandbox/)
+  assert.match(res.warning, /not isolated from each other/)
+  assert.match(res.warning, new RegExp(`${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is a config layer`))
   assert.doesNotMatch(res.warning, /differs from the measured/)
+  assert.doesNotMatch(res.warning, /full access of the user/)
+  assert.doesNotMatch(res.warning, /runs in the repository itself/)
+})
+
+test('probe: a full dispatch is told the git denies are off there', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
+  const home = await freshDir('home')
+  const res = await probe({ env: { ...process.env, OPENCODE_CONFIG_DIR: home, FAKE_OC_AUTH: 'anthropic', FLEETMATES_OPENCODE_MANAGED_DIR: path.join(home, 'absent') }, sandboxMode: 'full' })
+  assert.equal(res.ok, true)
+  assert.match(res.warning, /runs in the repository itself/)
 })
 
 test('probe: sandbox "none" says the permission rules are off as well', { timeout: 5000, skip: WIN32_FAKE_SKIP }, async () => {
@@ -509,7 +576,8 @@ test('spawnOpenCode stops an oversized stream, counting what is already on disk,
   const cwd = await freshDir('flood')
   const streamPath = path.join(scratch, `${path.basename(cwd)}.jsonl`)
   await writeFile(streamPath, 'p'.repeat(3000))
-  await withEnv({ FAKE_OC_FLOOD: '1', FAKE_OC_FLOOD_CHUNK: '500' }, async () => {
+  await setFake({ flood: true, floodChunk: 500 })
+  {
     const handle = await spawnOpenCode({ sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'flood', streamPath, maxStreamBytes: 4096 })
     try {
       const exited = once(handle.child, 'exit')
@@ -524,7 +592,7 @@ test('spawnOpenCode stops an oversized stream, counting what is already on disk,
       // The fake floods forever: an adapter that fails to kill it must not leak it into the suite.
       try { handle.child.kill('SIGKILL') } catch { /* already gone */ }
     }
-  })
+  }
 })
 
 // Only the symlink refusal is asserted here. A stream past `maxStreamBytes` is refused by the
@@ -539,4 +607,105 @@ test('readResult never follows a symlinked stream file, with or without O_NOFOLL
   assert.equal(await readResult({ streamPath: linked }), null)
   // `noFollow: null` forces the path win32 takes, where O_NOFOLLOW is undefined.
   assert.equal(await readResult({ streamPath: linked, noFollow: null }), null)
+})
+
+// --- the dispatch commands (review finding I1) --------------------------------------------------
+
+// The `none` warning used to be unreachable: every caller did `probe({})`, so the sentence that
+// tells the user the permission rules are off was only ever produced by a test. These run the real
+// CLI, with the fake binary authenticated, and read what a user would see.
+const CLI_PLAN = `### Task 1: A
+
+**Files:**
+- Create: \`a.mjs\`
+`
+
+async function withCliRepo(fn) {
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-oc-cli-'))
+  const g = (args) => defaultGitExec(args, root)
+  await g(['init', '--quiet', '--initial-branch=main'])
+  await g(['config', 'user.email', 'test@example.com'])
+  await g(['config', 'user.name', 'Test'])
+  const planPath = path.join(root, 'plan.md')
+  await writeFile(planPath, CLI_PLAN, 'utf8')
+  await writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'x' }), 'utf8')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n', 'utf8')
+  await g(['add', '.'])
+  await g(['commit', '--quiet', '-m', 'initial'])
+  await g(['checkout', '--quiet', '-b', 'run-branch'])
+  const lines = []
+  const io = { out: (t) => lines.push(t), err: () => {} }
+  try {
+    return await fn({ root, planPath, io, lines })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+test('dispatch tells the user the harness is experimental and what the configured sandbox gives up', { timeout: 60000, skip: WIN32_FAKE_SKIP }, async () => {
+  const { runCli } = await import('../scripts/cli.mjs')
+  await setFake({ text: JSON.stringify(good) })
+  await withCliRepo(async ({ root, planPath, io, lines }) => {
+    await withEnv({ FAKE_OC_AUTH: 'anthropic' }, async () => {
+      await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+      lines.length = 0
+      // Default sandbox: the experimental and no-sandbox warnings, but not the `none` sentence.
+      await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'opencode', '--root', root], io)
+      const first = lines.join('\n')
+      assert.match(first, /warning: harness opencode is experimental/)
+      assert.match(first, /EXPERIMENTAL/)
+      assert.match(first, /no operating system sandbox/)
+      assert.match(first, /not isolated from each other/)
+      assert.doesNotMatch(first, /full access of the user/)
+
+      await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify({ harnesses: { opencode: { sandbox: 'none' } } }))
+      lines.length = 0
+      await runCli(['dispatch', '--run', 'r1', '--phase', '1', '--harness', 'opencode', '--root', root], io)
+      assert.match(lines.join('\n'), /full access of the user/)
+    })
+  })
+})
+
+// `dispatch-reviews` and `dispatch-integrator` need a gate manifest before they reach the probe, so
+// the end-to-end assertion above cannot cover them. What is pinned instead is the call sites
+// themselves: every `adapter.probe(` in the CLI passes a sandbox. LIMIT: this reads source text, so
+// it catches a call site reverted to `probe({})` but says nothing about the VALUE being right.
+test('every adapter.probe call site in the CLI passes the sandbox the dispatch will use', async () => {
+  const source = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const calls = [...source.matchAll(/adapter\.probe\(([^)]*)\)/g)].map((m) => m[1])
+  assert.equal(calls.length, 3, calls.join(' | '))
+  for (const call of calls) assert.match(call, /sandboxMode/, call)
+})
+
+// Review finding M1: the turn marker is part of the stream file, so it has to obey the same bound.
+// A marker written past the bound made `readBounded` return null for the whole file, which would
+// have blinded readResult, readError and readUsage at once.
+test('the turn marker is not written when it would push the stream past its bound', { timeout: 10000, skip: WIN32_FAKE_SKIP }, async () => {
+  const cwd = await freshDir('marker-bound')
+  const streamPath = path.join(await freshDir('marker-sessions'), 's.jsonl')
+  const events = [marker(), textEvent(JSON.stringify(good)), finishEvent({ input: 1, output: 1 })]
+  const existing = events.map((e) => JSON.stringify(e)).join('\n') + '\n'
+  await writeFile(streamPath, existing)
+  await setFake({ text: JSON.stringify(good) })
+  // A bound that the file already fills: the marker must not be appended, and the earlier turn
+  // must still be readable.
+  const handle = await spawnOpenCode({ sandbox: { cwd, meta: { mode: 'full' } }, prompt: 'p', streamPath, maxStreamBytes: existing.length })
+  try {
+    await runToExit(handle)
+  } finally {
+    try { handle.child.kill('SIGKILL') } catch { /* already gone */ }
+  }
+  assert.equal((await readFile(streamPath, 'utf8')), existing, 'nothing was appended past the bound')
+  assert.deepEqual(await readResult({ streamPath, maxStreamBytes: existing.length }), good)
+  assert.deepEqual(await readUsage({ streamPath, maxStreamBytes: existing.length }), { input: 1, cachedInput: 0, cacheWrite: 0, output: 1, reasoning: 0 })
+})
+
+// Review finding M3: an `error` event with no error object left the task orphaned with no reason
+// at all, which is the one thing readError exists to prevent.
+test('readError reports an error event that carries no error object as unknown', async () => {
+  const streamPath = await streamWith([marker(), { type: 'error', timestamp: 1, sessionID: 'ses_1' }])
+  assert.deepEqual(await readError({ streamPath }), { type: 'unknown', message: '', retriable: false, retryAfterMs: null })
+  const arrayError = await streamWith([marker(), { type: 'error', timestamp: 1, sessionID: 'ses_1', error: ['boom'] }])
+  assert.deepEqual(await readError({ streamPath: arrayError }), { type: 'unknown', message: '', retriable: false, retryAfterMs: null })
+  assert.equal(await readResult({ streamPath }), null)
 })

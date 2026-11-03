@@ -1,6 +1,11 @@
 import { probeCommand } from './probe-command.mjs'
 // The only module in this repository that knows the OpenCode CLI (`opencode`), per
-// docs/specs/2026-11-02-headless-driver-opencode-design.md. Everything else talks to
+// docs/specs/2026-11-02-headless-driver-opencode-design.md.
+//
+// EXPERIMENTAL. Every fact this adapter is built on was measured on a free tier that refuses the
+// first model call, so the successful-turn path — the `text` event `readResult` reads and the
+// `step_finish.part.tokens` `readUsage` sums — has never been executed. `probe` says so on every
+// dispatch. Do not treat it as equal to the codex and cursor adapters. Everything else talks to
 // `opencodeAdapter` through the harness-neutral interface (`scripts/harnesses/index.mjs`).
 //
 // Teammates only ever run in a git-less `files` checkout (spec §2): OpenCode has NO operating
@@ -67,11 +72,13 @@ function baseArgs({ model }) {
 
 export function buildSpawnArgv({ sandbox, model, prompt, enforcement }) {
   refuseEnforcement(sandbox, enforcement)
+  policyMode(sandbox)
   return assertSafeArgv([...baseArgs({ model }), '--', promptArg(prompt)])
 }
 
 export function buildResumeArgv({ sandbox, sessionId, model, message, enforcement }) {
   refuseEnforcement(sandbox, enforcement)
+  policyMode(sandbox)
   if (typeof sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(sessionId)) throw new Error('Invalid opencode session id')
   return assertSafeArgv([...baseArgs({ model }), '-s', sessionId, '--', promptArg(message)])
 }
@@ -85,54 +92,97 @@ function promptArg(text) {
   return text
 }
 
-// Bash commands that would make a commit, move a ref or change a branch. The gate is computed from
-// git, and a teammate that commits on its own would put work on a ref the host never observed, so
-// these are denied even though `bash` is `allow` by default. Both the bare command and the
-// argument form are listed: OpenCode matches the last rule whose pattern matches, and the exact
-// glob semantics of a bash pattern are NOT MEASURED (spec §6).
+// Bash commands whose BARE form would make a commit or move a ref. The gate is computed from git,
+// and a teammate that commits on its own would put work on a ref the host never observed.
+//
+// LIMIT, and the spec says the same (§4.2): this is prefix pattern matching over the command line,
+// so it stops `git commit` and nothing else. `git -C <dir> commit`, `GIT_DIR=… git commit`,
+// `/usr/bin/git commit`, `sh -c "git commit"`, `cd … && git commit`, a script, or any language with
+// a subprocess call all pass. OpenCode has no sandbox, so no rule here can be more than defence in
+// depth; the containment that does work is that the teammate's cwd holds no repository at all.
 const DENIED_BASH = ['git commit', 'git push', 'git checkout', 'git switch', 'git branch',
   'git reset', 'git rebase', 'git merge', 'git tag', 'git update-ref', 'git cherry-pick', 'git am']
 
-// The policy the adapter hands the child in `OPENCODE_CONFIG_CONTENT` (spec §4.2). `snapshot: false`
-// stops OpenCode keeping a parallel snapshot repository over the checkout. `external_directory`
-// deny is its only path-scoped rule; with `network: false`, `webfetch` and `websearch` are denied
-// too. In `none` mode the deny rules are dropped: that mode exists to say, loudly, that nothing is
-// enforced. A `full` sandbox (reviewers, the integrator) does not get them either: the integrator's
-// whole job is to merge and commit in the user's own repository.
-export function configContent({ mode, network }) {
-  if (mode !== 'files') return JSON.stringify({ snapshot: false })
-  const bash = { '*': 'allow' }
-  for (const command of DENIED_BASH) {
-    bash[command] = 'deny'
-    bash[`${command} *`] = 'deny'
+// Which policy a sandbox gets. `meta.mode` stays the shared vocabulary the driver and the brief
+// understand (`files` for the git-less checkout, `full` for the user's own repository); the opt-in
+// weak mode is `meta.rules`, read HERE and nowhere else, so `harnesses.opencode.sandbox = "none"`
+// never changes how the rest of the repository reads a checkout (review finding I3).
+export function policyMode(sandbox) {
+  const meta = sandbox?.meta ?? {}
+  if (meta.rules === 'none') return 'none'
+  if (meta.mode !== 'files' && meta.mode !== 'full') {
+    throw new Error(`OpenCode cannot run in a ${meta.mode ?? 'missing'} sandbox`)
   }
-  return JSON.stringify({
-    snapshot: false,
-    permission: {
-      external_directory: 'deny',
-      ...(network ? {} : { webfetch: 'deny', websearch: 'deny' }),
-      bash,
-    },
-  })
+  return meta.mode
 }
 
-// The environment one teammate's `opencode` runs with. `OPENCODE_CONFIG_CONTENT` is the
-// second-to-last config layer, so it wins over the user's global and project config (but not over
-// a managed `/etc/opencode/`, which `probe` reports). In a teammate checkout the project config
-// layers are switched off outright: `opencode.json` and `.opencode/` are scrubbed control paths,
-// and `.claude` material in the checkout is teammate-writable too.
-export function childEnv({ mode, network, env = process.env }) {
-  const own = {
-    OPENCODE_CONFIG_CONTENT: configContent({ mode, network }),
-    OPENCODE_DISABLE_AUTOUPDATE: '1',
+// The policy the adapter hands the child in `OPENCODE_CONFIG_CONTENT` (spec §4.2). `snapshot: false`
+// everywhere: it stops OpenCode keeping a parallel snapshot repository over the workspace.
+//
+// - `files`: the full set. `external_directory` deny is OpenCode's only path-scoped rule; `webfetch`
+//   and `websearch` are denied unless the host approved network; the bare git commands above are
+//   denied, because the host owns the commit.
+// - `full`: reviewers and the integrator, in the user's own repository. The git denies are dropped
+//   there and only there — the integrator's whole job is to merge and commit — but
+//   `external_directory` and the fetch denies have nothing to do with committing and still apply
+//   (review finding B1: this path used to get no policy at all).
+// - `none`: the opt-in weak mode. Nothing but `snapshot: false`. That is what the mode means, and it
+//   is reachable only by writing `harnesses.opencode.sandbox = "none"`.
+export function configContent({ mode, network }) {
+  if (mode === 'none') return JSON.stringify({ snapshot: false })
+  const permission = {
+    external_directory: 'deny',
+    ...(network ? {} : { webfetch: 'deny', websearch: 'deny' }),
   }
-  if (mode === 'full') return { ...env, ...own }
-  return {
-    ...env,
-    ...own,
-    OPENCODE_DISABLE_PROJECT_CONFIG: '1',
-    OPENCODE_DISABLE_CLAUDE_CODE: '1',
+  if (mode === 'files') {
+    const bash = { '*': 'allow' }
+    for (const command of DENIED_BASH) {
+      bash[command] = 'deny'
+      bash[`${command} *`] = 'deny'
+    }
+    permission.bash = bash
   }
+  return JSON.stringify({ snapshot: false, permission })
+}
+
+// The host variables a teammate's `opencode` may see. An allowlist, not a filter: OpenCode has no
+// sandbox and its `bash` is `allow`, so every variable that reaches the process reaches the
+// teammate's shell. Kept out, deliberately (review finding I2):
+//
+// - `GH_TOKEN`, `*_API_KEY`, `SSH_AUTH_SOCK` and every other credential. OpenCode authenticates
+//   from `auth.json` in its data directory, which `probe` requires; a provider key that lives only
+//   in the environment is NOT forwarded, and the spec says so.
+// - `GIT_DIR`, `GIT_WORK_TREE`, `GIT_*`: they would reconstitute a repository inside a checkout the
+//   adapter describes as git-less (codex.mjs says the same thing about its own child).
+// - the host's `PWD`/`OLDPWD`, which name the run repository the git-less layout exists to hide.
+//   `PWD` is set to the child's own cwd instead.
+// - every `OPENCODE_*` of the host except `OPENCODE_CONFIG_DIR`. `OPENCODE_CONFIG` and
+//   `OPENCODE_CONFIG_CONTENT` are config LAYERS: forwarding them would let the caller's environment
+//   re-allow what this adapter denies.
+const ENV_ALLOWLIST = [
+  'PATH', 'HOME', 'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TMPDIR', 'TZ', 'USER', 'LOGNAME',
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
+  // `OPENCODE_CONFIG_DIR` is the config HOME `probe` validates, not a config layer, so the child
+  // must agree with the probe about where it is.
+  'OPENCODE_CONFIG_DIR',
+  // Windows needs these to start a process at all.
+  'SystemRoot', 'SYSTEMROOT', 'COMSPEC', 'ComSpec', 'PATHEXT', 'USERPROFILE', 'APPDATA',
+  'LOCALAPPDATA', 'TEMP', 'TMP', 'NUMBER_OF_PROCESSORS', 'OS', 'WINDIR',
+]
+
+export function childEnv({ mode, network, env = process.env, cwd }) {
+  const out = {}
+  for (const key of ENV_ALLOWLIST) if (env[key] !== undefined) out[key] = env[key]
+  if (cwd) out.PWD = cwd
+  out.OPENCODE_CONFIG_CONTENT = configContent({ mode, network })
+  out.OPENCODE_DISABLE_AUTOUPDATE = '1'
+  // The project config layers (`opencode.json`, `.opencode/`) and the Claude Code layer
+  // (`.claude`, `CLAUDE.md`, skills) are read from the workspace, which in a checkout the teammate
+  // writes and in the user's repository a landed commit can change. Off in every mode: neither has
+  // anything to do with the integrator's commits (review finding B1).
+  out.OPENCODE_DISABLE_PROJECT_CONFIG = '1'
+  out.OPENCODE_DISABLE_CLAUDE_CODE = '1'
+  return out
 }
 
 // OpenCode has no output-schema flag (spec §4.4), so the contract travels in the prompt and
@@ -149,7 +199,7 @@ export const RESULT_INSTRUCTION = '\n\n---\n'
   + '"status" ("done", "blocked" or "failed"), "branch" (string), "filesChanged" (array of '
   + 'strings), "summary" (string), "blockers" (array of strings).'
 
-const isCheckout = (sandbox) => sandbox.meta.mode === 'files' || sandbox.meta.mode === 'none'
+const isCheckout = (sandbox) => sandbox.meta.mode === 'files'
 
 function withInstruction(sandbox, text) {
   return isCheckout(sandbox) ? `${FILES_PREAMBLE}${text}${RESULT_INSTRUCTION}` : text
@@ -271,26 +321,31 @@ function run(argv, { streamPath, errPath, cwd, env, append, maxStreamBytes = STR
   return { child, sessionId, flushed, get outputLimited() { return limited } }
 }
 
-async function markTurn(streamPath, prompt) {
-  await writeFile(streamPath, `${JSON.stringify({ ...TURN_MARKER, bytes: Buffer.byteLength(prompt) })}\n`, { flag: 'a' })
+// The marker counts against the capture bound like everything else in the file (review finding M1):
+// past the bound it is not written at all, so a stream that is already full never grows beyond it
+// and `readBounded` keeps returning the turns that fit instead of `null` for everything.
+async function markTurn(streamPath, prompt, maxStreamBytes) {
+  const line = `${JSON.stringify({ ...TURN_MARKER, bytes: Buffer.byteLength(prompt) })}\n`
+  if (existingBytes(streamPath) + Buffer.byteLength(line) > maxStreamBytes) return
+  await writeFile(streamPath, line, { flag: 'a' })
 }
 
-export async function spawnOpenCode({ sandbox, prompt, model, network, enforcement, streamPath, errPath, maxStreamBytes, env = process.env }) {
+export async function spawnOpenCode({ sandbox, prompt, model, network, enforcement, streamPath, errPath, maxStreamBytes = STREAM_LIMIT_BYTES, env = process.env }) {
   const text = withInstruction(sandbox, prompt)
   const argv = buildSpawnArgv({ sandbox, model, prompt: text, enforcement })
   await prepareWorkspace(sandbox)
-  await markTurn(streamPath, text)
+  await markTurn(streamPath, text, maxStreamBytes)
   return run(argv, { streamPath, errPath, cwd: sandbox.cwd, append: true, maxStreamBytes,
-    env: childEnv({ mode: sandbox.meta.mode, network, env }) })
+    env: childEnv({ mode: policyMode(sandbox), network, env, cwd: sandbox.cwd }) })
 }
 
-export async function resumeOpenCode({ sandbox, sessionId, message, model, network, enforcement, streamPath, errPath, maxStreamBytes, env = process.env }) {
+export async function resumeOpenCode({ sandbox, sessionId, message, model, network, enforcement, streamPath, errPath, maxStreamBytes = STREAM_LIMIT_BYTES, env = process.env }) {
   const text = withInstruction(sandbox, message)
   const argv = buildResumeArgv({ sandbox, sessionId, model, message: text, enforcement })
   await prepareWorkspace(sandbox)
-  await markTurn(streamPath, text)
+  await markTurn(streamPath, text, maxStreamBytes)
   return run(argv, { streamPath, errPath, cwd: sandbox.cwd, append: true, maxStreamBytes,
-    env: childEnv({ mode: sandbox.meta.mode, network, env }) })
+    env: childEnv({ mode: policyMode(sandbox), network, env, cwd: sandbox.cwd }) })
 }
 
 // A bounded read of the stream file that does not follow a final symlink: `null` when it is
@@ -361,14 +416,17 @@ const RETRIABLE_ERRORS = new Set(['provider.free-limit', 'provider.no-route'])
 // unknown flag alike, and a successful exit was not measurable without a paid credential.
 export async function readError({ streamPath, maxStreamBytes, noFollow, beforeOpen }) {
   const events = lastTurn(await streamEvents(streamPath, maxStreamBytes, { noFollow, beforeOpen }))
-  const evt = events.filter((e) => e.type === 'error' && e.error && typeof e.error === 'object').pop()
+  const evt = events.filter((e) => e.type === 'error').pop()
   if (!evt) return null
-  const type = typeof evt.error.type === 'string' ? evt.error.type : 'unknown'
+  // An `error` event with no error object still has to be diagnosable (review finding M3): the turn
+  // failed, and `unknown` with an empty message is more recoverable than `null`.
+  const error = evt.error && typeof evt.error === 'object' && !Array.isArray(evt.error) ? evt.error : {}
+  const type = typeof error.type === 'string' && error.type ? error.type : 'unknown'
   return {
     type,
-    message: typeof evt.error.message === 'string' ? evt.error.message : '',
+    message: typeof error.message === 'string' ? error.message : '',
     retriable: RETRIABLE_ERRORS.has(type),
-    retryAfterMs: Number.isSafeInteger(evt.error.retryAfterMs) ? evt.error.retryAfterMs : null,
+    retryAfterMs: Number.isSafeInteger(error.retryAfterMs) ? error.retryAfterMs : null,
   }
 }
 
@@ -402,9 +460,11 @@ const textOf = (evt) => (evt.type === 'text' && evt.part && typeof evt.part.text
 
 // The turn's result, validated. There is no result event: the turn ends at EOF, so the answer is
 // the model's last text (spec §4.4). Only the events after the host's turn marker count, so a
-// resume never returns the previous turn's answer. An `error` event in the turn means there is no
-// answer at all. `null` — never a throw — for anything that is not a valid result: every such case
-// is `orphaned`, not a driver crash.
+// resume never returns the previous turn's answer. Any `error` event in the turn discards the whole
+// turn: whether OpenCode can emit a non-fatal `error` beside a good answer is NOT MEASURED, and
+// since events can arrive out of order (spec §1 item 14) the conservative reading is the safe one.
+// `null` — never a throw — for anything that is not a valid result: every such case is `orphaned`,
+// not a driver crash.
 export async function readResult({ streamPath, maxStreamBytes, noFollow, beforeOpen }) {
   const turn = lastTurn(await streamEvents(streamPath, maxStreamBytes, { noFollow, beforeOpen }))
   if (turn.some((e) => e.type === 'error')) return null
@@ -497,7 +557,9 @@ export async function makeOpenCodeSandbox(git, { runRepo, runBranch, runId, task
     } catch (error) { if (error.code !== 'ENOENT') throw error }
   }
   const sandbox = await makeFilesSandbox(git, { runRepo, runBranch, runId, taskId, checkoutRoot })
-  sandbox.meta.mode = mode
+  // `meta.mode` stays `files` for both: the layout IS the same, and the driver, the brief and
+  // `commitFilesTree` read that string (review finding I3). Only the policy differs.
+  if (mode === 'none') sandbox.meta.rules = 'none'
   return sandbox
 }
 
@@ -535,12 +597,14 @@ export async function cleanup({ sandbox }) {
 
 const VERSION_LINE = /\bv?(\d+)\.(\d+)\.(\d+)\b/
 
-// Authenticated, on the measured major version, config home writable, and no managed config that
+// Authenticated, on the measured major version, config home writable, and no config layer that
 // outranks the policy this adapter sets. Never runs an agent turn.
 //
-// Every successful probe carries a warning: OpenCode has NO operating system sandbox, in any mode,
-// and `sandbox: "none"` drops even the permission denies. `sandboxMode` is optional, so a caller
-// that knows the configured mode gets the stronger sentence.
+// Every successful probe carries a warning, and `dispatch*` prints it: this harness is
+// EXPERIMENTAL, OpenCode has NO operating system sandbox in any mode, concurrent teammates are not
+// isolated from each other, and the user's own global config runs in every teammate turn.
+// `sandboxMode` is what the dispatch is about to use (`files`, `none` or `full`), so the warning
+// names the policy the teammate will actually get.
 export async function probe({ env = process.env, sandboxMode } = {}) {
   const home = env.OPENCODE_CONFIG_DIR || path.join(env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'opencode')
   const version = await probeCommand('opencode', ['--version'], env)
@@ -589,8 +653,15 @@ export async function probe({ env = process.env, sandboxMode } = {}) {
   } catch { /* no managed config */ }
 
   const warnings = [
-    'OpenCode has no operating system sandbox: a teammate\'s shell is limited only by OpenCode\'s own permission rules, which are pattern matching',
+    'the opencode harness is EXPERIMENTAL: its successful-turn path has never been executed (no paid credential), so the event shape readResult depends on is unverified and a working turn may still be reported as orphaned',
+    'OpenCode has no operating system sandbox: a teammate\'s shell is limited only by OpenCode\'s own permission rules, which are prefix pattern matching and do not stop git run through a wrapper, another directory or a script',
+    'concurrent OpenCode teammates are not isolated from each other: with maxParallel > 1 one teammate can write into another\'s checkout, and the host commits what it finds there',
     ...(sandboxMode === 'none' ? ['harnesses.opencode.sandbox is "none": even those permission rules are off, so a teammate runs with the full access of the user running fleetmates'] : []),
+    ...(sandboxMode === 'full' ? ['this dispatch runs in the repository itself (reviewers, integrator) with only external_directory and the fetch denies: the git denies are off there, because the integrator commits'] : []),
+    // `home` exists: the writability check above created and removed a directory inside it. It is a
+    // config layer this adapter does not control, and plugins and MCP servers defined there run
+    // inside every teammate turn (review finding M5), as Cursor's probe warns for `~/.cursor`.
+    `${home} is a config layer this adapter does not control: plugins and MCP servers defined there run in every teammate turn`,
     ...(managedFound ? [`${managed} is merged after the policy this adapter sets and can re-allow what it denies`] : []),
     ...(found === MEASURED_VERSION ? [] : [`opencode ${found} differs from the measured ${MEASURED_VERSION}; the event format and permission keys are not pinned by any version guarantee`]),
   ]

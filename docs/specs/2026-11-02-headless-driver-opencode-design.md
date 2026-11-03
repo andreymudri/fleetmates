@@ -1,6 +1,14 @@
 # Headless driver — the OpenCode adapter — design
 
-Date: 2026-11-02. The third harness after Codex and Cursor, asked for by
+**Status: EXPERIMENTAL.** Every measurement below was taken on a free tier that refuses the first
+model call, so the successful-turn path has never been executed: if the real `text` event is not
+`{type:"text", part:{text}}`, `readResult` returns `null` for every good turn and every task is
+reported `orphaned`. `probe` says so on every dispatch, `resolveHarness` says so when the harness is
+selected, and `EXPERIMENTAL_HARNESSES` in `scripts/config.mjs` names it beside `KNOWN_HARNESSES`.
+Do not treat this adapter as equal to the Codex and Cursor ones.
+
+Date: 2026-11-02, revised 2026-11-03 after review (review findings B1, I1, I2, I3, I4, I7, M1, M3
+and M5 are fixed here; I5 and I6 are stated limits). The third harness after Codex and Cursor, asked for by
 `docs/followups/2026-11-02-deepseek-and-opencode-next-steps.md` section 3. It implements the
 adapter interface fixed by `docs/specs/2026-09-14-headless-driver-codex-design.md` (the "Codex
 spec") and follows `docs/specs/2026-09-16-headless-driver-cursor-design.md` (the "Cursor spec")
@@ -108,11 +116,21 @@ user can. There is no seatbelt, no landlock, no container.
 | Codex-style clone with the `.git` pointer | rejected | Nothing stops the teammate's shell from writing into that git directory's `config` and running a filter the next git command executes. OpenCode's own git calls (`rev-parse --show-toplevel`) run outside any confinement because there is none. |
 | Clone with the pointer removed | rejected | Same exposure, and the shell would need `GIT_DIR` to commit, which hands the teammate the git directory anyway. |
 | **Git-less checkout, deny rules, host commits** | **chosen (`files`, default)** | No repository in the workspace, so a planted git config has nothing to act on; the gate still reads commits the host made from bytes it read itself. |
-| The same checkout with no deny rules | **opt-in only (`none`)** | Honest name for "nothing is enforced". Never selected automatically; `probe` says so on every dispatch. |
+| The same checkout with no deny rules | **opt-in only (`none`)** | Honest name for "nothing is enforced". Reachable only by writing `harnesses.opencode.sandbox = "none"`. |
+| The user's own repository (`full`) | **not configurable, but reachable** | `dispatch-reviews` and `dispatch-integrator` build `{cwd: root, meta: {mode: 'full'}}` themselves, for every harness, without `makeSandbox`. It cannot be chosen through `harnesses.opencode.sandbox`, and it is NOT the `none` policy: see §4.2. |
 | A container or `bwrap`/`sandbox-exec` wrapper | out of scope here | The followup lists it as the low-risk option. It is a separate piece of work: it adds a runtime dependency and per-platform code, and it would wrap any harness, not just this one. |
 
 The same principle the Codex adapter applies to `danger-full-access` applies here: the weak mode
-exists, it is reachable only through explicit configuration, and no code path picks it.
+exists and is reachable only through explicit configuration. The one dispatch that does not go
+through `makeSandbox` is the reviewer and integrator path, which hands every adapter a `full`
+sandbox on the real repository; §4.2 says what policy that gets, and `probe` is told `full` so its
+warning names it.
+
+**Concurrent teammates are not isolated from each other** (review finding I5). Checkouts are
+siblings under one run directory and OpenCode confines nothing, so with `maxParallel > 1` teammate A
+can write into B's checkout, and the host commits what it finds there as B's work; the same holds
+for B's stream file. This cannot be fixed inside the adapter. `probe` warns about it, and a fleet
+that depends on the declared-file-set property should run OpenCode with `maxParallel: 1`.
 
 Cost: an OpenCode teammate cannot commit, so a task lands as one host-made commit.
 
@@ -150,23 +168,44 @@ is not one bounded token (`#` included, item 5) is refused, never repaired.
 answer, and a headless teammate cannot work at all. The denies below are what `--auto` must not
 override.
 
-Environment of the child (`childEnv`):
+Environment of the child (`childEnv`) is an **allowlist**, not a filter (review finding I2):
+OpenCode has no sandbox and its `bash` is `allow`, so every variable the process gets, the
+teammate's shell gets. Passed through when set: `PATH`, `HOME`, `LANG`, `LANGUAGE`, `LC_ALL`,
+`LC_CTYPE`, `TERM`, `TMPDIR`, `TZ`, `USER`, `LOGNAME`, the `XDG_*` directories,
+`OPENCODE_CONFIG_DIR` (the config home `probe` validates) and the variables Windows needs to start
+a process. `PWD` is set to the child's own cwd. Everything else is dropped:
+
+| Dropped | Why |
+|---|---|
+| `GH_TOKEN`, `*_API_KEY`, `SSH_AUTH_SOCK`, every other credential | the teammate's shell would read them. OpenCode authenticates from `auth.json`, which `probe` requires; **a provider key that lives only in the environment is not forwarded, so that setup does not work with this adapter** |
+| `GIT_DIR`, `GIT_WORK_TREE`, every other `GIT_*` | they would reconstitute a repository inside a checkout this adapter calls git-less; `codex.mjs` makes the same point about its own child |
+| the host's `PWD` and `OLDPWD` | they name the run repository the git-less layout exists to hide |
+| every host `OPENCODE_*` except `OPENCODE_CONFIG_DIR` | `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` are config LAYERS: forwarding them would let the caller's environment re-allow what this adapter denies |
+
+Set by the adapter, in every mode:
 
 | Variable | Value | Why |
 |---|---|---|
 | `OPENCODE_CONFIG_CONTENT` | the policy of §4.2 | item 15; it is the second-to-last config layer, so it beats the user's global and project config |
 | `OPENCODE_DISABLE_AUTOUPDATE` | `1` | the version is pinned and checked (§4.5); an autoupdate would move it under the run |
-| `OPENCODE_DISABLE_PROJECT_CONFIG` | `1` (checkout modes only) | the project config layer is read from the teammate-writable checkout |
-| `OPENCODE_DISABLE_CLAUDE_CODE` | `1` (checkout modes only) | otherwise `.claude` material in the checkout, which the teammate can write, is read as instructions and skills |
+| `OPENCODE_DISABLE_PROJECT_CONFIG` | `1` | the project config layer is read from the workspace, which a teammate writes in a checkout and a landed commit can change in the repository |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | `1` | the same, for `.claude`, `CLAUDE.md` and skills |
 
-A `full` sandbox (reviewers, the integrator) is the user's own repository, so it keeps the project
-and `.claude` layers and gets only `snapshot: false`.
+The last two apply to `full` too: neither has anything to do with the integrator's commits (review
+finding B1). The cost is that a project-level `opencode.json` is ignored; the global config home,
+where credentials and providers live, still applies.
 
 **Not isolated:** the data directory, the session SQLite database and the cache are shared between
 every teammate on the host (item 18). Redirecting them with `XDG_DATA_HOME` would also hide
 `auth.json`, so the adapter leaves them alone. Concurrent teammates therefore share one database.
 
 ### 4.2 Policy, scrub and control paths
+
+`policyMode(sandbox)` picks the policy: `none` when `meta.rules === 'none'`, otherwise `meta.mode`,
+and any other mode throws before a process is spawned. `meta.mode` itself is only ever `files` or
+`full` — the opt-in weak mode lives in `meta.rules`, so nothing outside this adapter has to learn a
+new mode string (review finding I3: `driver.mjs` and `brief.mjs` compare `meta.mode` with
+`'files'`, and a `'none'` there silently dropped the previous fix round's commit).
 
 The policy (`configContent`), for `files`:
 
@@ -178,19 +217,26 @@ The policy (`configContent`), for `files`:
     "bash": { "*": "allow", "git commit": "deny", "git commit *": "deny", "…": "deny" } } }
 ```
 
+| Mode | Policy |
+|---|---|
+| `files` | the whole block above |
+| `full` | `snapshot: false`, `external_directory: deny` and the fetch denies. **No git denies**: the integrator's whole job is to merge and commit in the user's repository |
+| `none` | `snapshot: false` and nothing else. That is what the mode means |
+
 - `snapshot: false` — item 16. Without it OpenCode keeps a parallel snapshot repository over the
-  checkout.
+  workspace.
 - `external_directory: deny` — its only path-scoped rule. It is pattern matching over parsed paths,
   **not** confinement, and is documented as such.
 - `webfetch`/`websearch` are denied unless `harnesses.opencode.network` is true.
 - `bash` is `allow` by default in OpenCode, which means the model can run `git commit` by itself.
-  The gate is computed from git and tolerates no commit the host did not make, so every
-  ref-moving git command is denied, in both the bare and the argument form:
-  `git commit|push|checkout|switch|branch|reset|rebase|merge|tag|update-ref|cherry-pick|am`.
-  The exact glob semantics of these patterns are **not measured** (§1b); the two forms are listed
-  because the last matching rule wins.
-
-In `none` mode only `snapshot: false` is sent. That is what the mode means.
+  The gate is computed from git and tolerates no commit the host did not make, so
+  `git commit|push|checkout|switch|branch|reset|rebase|merge|tag|update-ref|cherry-pick|am` are
+  denied — **in the bare and the ` *` form only** (review finding I4). They do **not** cover
+  `git -C <dir> commit`, `GIT_DIR=… git commit`, `/usr/bin/git commit`, `sh -c 'git commit'`,
+  `cd … && git commit`, a written script, or any language with a subprocess call, and the glob
+  semantics themselves are not measured (§1b). The containment that does work is that the
+  teammate's cwd holds no repository at all, which is what makes a bare `git commit` a no-op; the
+  denies are defence in depth over that and nothing more. `probe` says the same.
 
 `CONTROL_PATHS` gains `.opencode` and `opencode.json`: a teammate that plants a plugin, an MCP
 server or an agent definition there executes code inside the next `opencode run`. They are scrubbed
@@ -226,20 +272,32 @@ filters off, assembles the tree in a private index, and never points git at the 
   before each spawn and each resume the host appends one line of its own to the stream file,
   `{"type":"fleetmates.turn","bytes":…}`. The last turn is everything after the last such line.
   This is what keeps a resume that produced no answer from returning the previous turn's answer.
+  It counts against `maxStreamBytes` like everything else in the file, so a stream already at the
+  bound does not get one (review finding M1). **Forgeable** (review finding I6): it is an ordinary
+  JSON line, so whoever can append to the stream file can append markers and texts and choose what
+  `readResult` returns. The impact is bounded — the gate reads git, not the result — but `status`,
+  `summary`, `filesChanged` and `branch` as reported to the user are not trustworthy against a
+  teammate that reaches the run directory, and with no sandbox nothing stops it from trying.
 - **Result** — OpenCode has no output-schema flag, so the contract is in the prompt
   (`RESULT_INSTRUCTION`), as for Cursor. `readResult` reads the last turn, returns `null` when it
   holds any `error` event, and otherwise takes the model's last `text` event (then, as a fallback,
   every `text` of the turn joined) and accepts the first candidate — whole text, last fenced
   ```` ```json ```` block, or a JSON object ending the text — that validates against
   `RESULT_SCHEMA`. `null` → `orphaned`, never a throw. **The `text` event shape is not measured**:
-  the reader takes `part.text` when it is a string and ignores everything else.
+  the reader takes `part.text` when it is a string and ignores everything else. Discarding a whole
+  turn for any `error` event is conservative: whether OpenCode can emit a non-fatal `error` beside
+  a good answer is also not measured, and events can arrive out of order (item 14).
 - **Errors** — `readError` returns the last `error` of the turn as
   `{ type, message, retriable, retryAfterMs }`. `provider.free-limit` and `provider.no-route` are
   `retriable: true`: they say nothing about the work, so they are infrastructure failures rather
   than a failed task. The adapter interface has no channel for that distinction today, so
   `readResult` still returns `null` and the task is `orphaned`; `readError` exists so the reason is
-  recoverable from the stream by a caller or by hand. The exit code is deliberately not the signal
-  (item 7).
+  recoverable from the stream. The driver **does** use it: `dispatchPhase` prefers
+  `adapter.readError` over `stderrTail` for the orphan reason, so a free-limit fleet records
+  `provider.free-limit: Free usage limit reached (retry after … ms)` instead of `no result`
+  (review finding I7). `readError` is an optional adapter property, like `cleanupOnResult`, so no
+  other harness changes. An `error` event with no error object still reports `unknown` rather than
+  nothing (review finding M3). The exit code is deliberately not the signal (item 7).
 - **Usage** — `readUsage` sums `step_finish.part.tokens` over the whole stream file (so a resume's
   turns add up), mapping `input`, `output`, `reasoning`, `cache.read` → `cachedInput` and
   `cache.write` → `cacheWrite`. `null` when no such event exists. **Not measured** (§1b): the field
@@ -263,11 +321,18 @@ Never runs an agent turn.
   else `fix: "run: opencode auth login"`.
 - The config home (`$OPENCODE_CONFIG_DIR`, else `$XDG_CONFIG_HOME/opencode`, else
   `~/.config/opencode`) must be writable.
-- Every successful probe returns a `warning`, which `dispatch` prints: OpenCode has no operating
-  system sandbox. With `sandboxMode: 'none'` the warning says that the permission rules are off as
-  well and the teammate runs with the user's full access. A managed config directory
-  (`/etc/opencode`) is named too: it is merged after `OPENCODE_CONFIG_CONTENT` and can re-allow
-  what the adapter denies.
+- Every successful probe returns a `warning`, which `dispatch`, `dispatch-reviews` and
+  `dispatch-integrator` print. It always says: the harness is experimental and its successful-turn
+  path has never run; OpenCode has no operating system sandbox and its rules are prefix pattern
+  matching that git run through a wrapper, another directory or a script escapes; concurrent
+  teammates are not isolated from each other; and the user's own config home is a layer this
+  adapter does not control, whose plugins and MCP servers run in every teammate turn (review
+  finding M5). A managed config directory (`/etc/opencode`) is named when present: it is merged
+  after `OPENCODE_CONFIG_CONTENT` and can re-allow what the adapter denies.
+- The three dispatch commands pass the sandbox they are about to use (`sandboxMode`), so the
+  warning for `none` ("even those permission rules are off") and for `full` ("runs in the
+  repository itself, the git denies are off there") actually reaches the user. Before the review
+  every caller passed `{}` and the `none` sentence was dead code (review finding I1).
 
 ### 4.6 Required role policies
 
@@ -315,17 +380,26 @@ Each test was watched failing with the code it covers broken, per `CONTRIBUTING.
 - Argv: exact spawn and resume shapes; `--standalone` and `--format json` required; each forbidden
   flag refused; a model token with `#` accepted and a dashed or oversized one refused.
 - Policy: the deny rules and `snapshot: false` reach the child's environment; `none` drops the deny
-  rules; `network: true` drops the `webfetch`/`websearch` denies; project and `.claude` layers are
-  disabled in a checkout and left alone in `full`.
+  rules; `full` keeps `external_directory` and the fetch denies and drops only the git ones;
+  `network: true` drops the `webfetch`/`websearch` denies; the project and `.claude` layers are off
+  in every mode.
+- Environment: the allowlist passes `PATH`/`HOME`/`TMPDIR`, drops `GH_TOKEN`, `GIT_DIR`,
+  `OPENCODE_CONFIG` and the host's `PWD`, and sets `PWD` to the child's cwd.
+- Modes: `meta.rules = 'none'` selects the weak policy while `meta.mode` stays `files`, so the
+  driver's fix-round rebase still applies; a `clone` sandbox is refused before a spawn.
 - Session id: taken from the first non-empty `sessionID`, not from the empty one of an early error.
 - `readResult`: raw JSON, fenced JSON, prose, an `error` event, a non-JSON line between events, and
   a resume that produced no answer after one that did.
 - `readError`: `provider.free-limit` is retriable and carries `retryAfterMs`; `unknown` is not.
 - `readUsage`: two `step_finish` events summed; none → `null`.
 - `probe`: a 1.x version refused, a 2.x drift warned, no authenticated integrations refused, an
-  unwritable config home refused, the no-sandbox warning always present, `none` warned about
-  explicitly.
-- Sandbox: `clone` and `full` refused; a checkout inside a git repository refused by name; collect
+  unwritable config home refused; the experimental, no-sandbox, no-isolation-between-teammates and
+  global-config warnings always present; `none` and `full` warned about explicitly.
+- The driver: an orphaned task whose stream holds a `provider.free-limit` records that reason, and
+  a harness without `readError` still records the stderr tail.
+- The CLI: `dispatch`, `dispatch-reviews` and `dispatch-integrator` pass a `sandboxMode` to
+  `probe`, and selecting the harness prints that it is experimental.
+- Sandbox: `makeSandbox` refuses `clone` and `full`; a checkout inside a git repository refused by name; collect
   refuses a planted `.opencode/plugin.js` or `opencode.json` and creates no branch; the refusal
   survives the scrub.
 - Control paths: `.opencode` and `opencode.json` scrubbed, kept from the run branch, never added.

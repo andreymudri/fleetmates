@@ -653,3 +653,35 @@ test('legacy adapter with observed host source and unverified worker identity ne
   assert.match(calls.spawn[0].prompt,/UNVERIFIED/)
   assert.ok(!/^\s*git checkout -B/m.test(calls.spawn[0].prompt))
 })
+
+// Review finding I7: OpenCode reports a provider failure as a stdout event, so `stderrTail` is
+// empty for it and every task of a rate-limited fleet was recorded with the same useless
+// `no result`. An adapter that exposes the OPTIONAL `readError` supplies the reason instead.
+test('an orphaned task takes its reason from the adapter\'s readError when the adapter has one', async () => {
+  const runDir = await tmpRunDir('orphan-readerror')
+  const { adapter, completeEnforcement } = makeStubAdapter({ result: null })
+  adapter.readError = async ({ streamPath }) => {
+    assert.ok(streamPath.endsWith(path.join('sessions', 'T1.stream.jsonl')))
+    return { type: 'provider.free-limit', message: 'Free usage limit reached', retriable: true, retryAfterMs: 80668000 }
+  }
+  const out = await dispatchPhase(baseArgs(runDir, { runId: 'r-err', adapter, completeEnforcement }))
+  assert.deepEqual(out.orphaned, ['T1'])
+  const session = await readSession(runDir, 'T1')
+  assert.equal(session.exitReason, 'provider.free-limit: Free usage limit reached (retry after 80668000 ms)')
+})
+
+test('an adapter without readError, or whose readError throws or says nothing, still records the old reason', async () => {
+  for (const [name, readError] of [
+    ['absent', undefined],
+    ['throws', async () => { throw new Error('boom') }],
+    ['null', async () => null],
+    ['malformed', async () => ({ message: 'no type' })],
+  ]) {
+    const runDir = await tmpRunDir(`orphan-noerr-${name}`)
+    const { adapter, completeEnforcement } = makeStubAdapter({ result: null })
+    if (readError) adapter.readError = readError
+    const out = await dispatchPhase(baseArgs(runDir, { runId: `r-${name}`, adapter, completeEnforcement }))
+    assert.deepEqual(out.orphaned, ['T1'], name)
+    assert.equal((await readSession(runDir, 'T1')).exitReason, 'no result', name)
+  }
+})
