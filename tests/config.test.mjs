@@ -981,7 +981,25 @@ test('loadGateConfig is left alone: it is still the plain reader', async () => {
 // `config set` reaches the same field rules through validateKey.
 test('harness vocabulary constants name the sandboxes and the known harnesses', () => {
   assert.deepEqual(SANDBOXES, ['clone', 'files', 'full'])
-  assert.deepEqual(KNOWN_HARNESSES, ['codex', 'cursor'])
+  assert.deepEqual(KNOWN_HARNESSES, ['codex', 'cursor', 'opencode'])
+})
+
+// OpenCode has no operating system sandbox, so `clone` and `full` are refused and the weak mode is
+// reachable only by naming it: docs/specs/2026-11-02-headless-driver-opencode-design.md §2.
+test('harnesses.opencode accepts only files and the opt-in none, in both layers and through config set', () => {
+  for (const sandbox of ['files', 'none']) {
+    const block = { harnesses: { opencode: { sandbox, network: false, timeoutMinutes: 30, tierModels: { capable: 'anthropic/claude-sonnet-5-5#thinking' } } } }
+    assert.equal(validateLocal(block), block)
+    assert.equal(validateGate(block), block)
+    assert.equal(validateKey('harnesses.opencode.sandbox', sandbox), sandbox)
+  }
+  for (const sandbox of ['clone', 'full', 'workspace-write']) {
+    assert.throws(() => validateKey('harnesses.opencode.sandbox', sandbox),
+      /OpenCode has no operating system sandbox; only "files" and the opt-in "none" are supported/, sandbox)
+  }
+  // The weak mode stays specific to OpenCode.
+  assert.throws(() => validateKey('harnesses.codex.sandbox', 'none'), /must be one of/)
+  assert.throws(() => validateKey('harnesses.cursor.sandbox', 'none'), /only "files" is supported/)
 })
 
 test('a well-formed harnesses.codex block passes both layers unchanged', () => {

@@ -10,10 +10,13 @@ export const LOCAL_FILE = NAMES.localFile
 export const CAVEMAN_LEVELS = ['lite', 'full', 'ultra']
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 export const SANDBOXES = ['clone', 'files', 'full']
-export const KNOWN_HARNESSES = ['codex', 'cursor']
+export const KNOWN_HARNESSES = ['codex', 'cursor', 'opencode']
 // The sandboxes each harness may run teammates in. Cursor runs git outside its own sandbox, so
 // only its git-less `files` checkout is safe (docs/specs/2026-09-16-headless-driver-cursor-design.md §2).
-export const HARNESS_SANDBOXES = { codex: SANDBOXES, cursor: ['files'] }
+// OpenCode has no operating system sandbox at all: `files` is the git-less checkout plus the deny
+// rules the adapter sets, and `none` is the opt-in that drops those rules
+// (docs/specs/2026-11-02-headless-driver-opencode-design.md §2).
+export const HARNESS_SANDBOXES = { codex: SANDBOXES, cursor: ['files'], opencode: ['files', 'none'] }
 export const ROLES = ['implementer', 'reviewer', 'integrator']
 
 // Keys that decide a verdict. They may appear only in the tracked manifest: the local file
@@ -198,6 +201,9 @@ export function validateHarnesses(harnesses, file) {
     if (entry.sandbox !== undefined && !HARNESS_SANDBOXES[name].includes(entry.sandbox)) {
       if (name === 'cursor') {
         throw new ConfigError('harnesses.cursor.sandbox: Cursor runs git outside its sandbox; only "files" is supported')
+      }
+      if (name === 'opencode') {
+        throw new ConfigError('harnesses.opencode.sandbox: OpenCode has no operating system sandbox; only "files" and the opt-in "none" are supported')
       }
       throw new ConfigError(`harnesses.${name}.sandbox must be one of ${HARNESS_SANDBOXES[name].join(', ')}`)
     }

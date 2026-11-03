@@ -154,7 +154,7 @@ test('getAdapter resolves the codex adapter, and HARNESS_NAMES lists it', () => 
 })
 
 test('getAdapter refuses an unknown harness, naming the known ones', () => {
-  assert.throws(() => getAdapter('bogus'), /unknown harness: bogus \(known: codex, cursor\)/)
+  assert.throws(() => getAdapter('bogus'), /unknown harness: bogus \(known: codex, cursor, opencode\)/)
 })
 
 // --- argv builders (spec §5), pure -------------------------------------------------------
