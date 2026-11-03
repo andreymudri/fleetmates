@@ -403,6 +403,12 @@ The same simulator runs by hand:
 It exits with the command's own exit code. A failure that appears only on a plain Linux run, such
 as one that needs the real temp directory, still reaches the remote CI.
 
+The simulated `core.autocrlf` reaches git only through `GIT_CONFIG_GLOBAL`. Code that drops every
+`GIT_*` variable before calling git, as a hardened git wrapper does, reads the user's real global
+config instead, so files checked out under the simulator read to it as modified. On a real machine
+both read the same global config and agree. A test of such code pins `core.autocrlf` in its
+fixture repository's own config, which every git reads.
+
 **`"flaky": true`** runs the check through the flaky detector. On a non-zero exit the check is
 retried exactly once, and a pass on that retry passes the check while keeping a `flaky: <id>`
 line in its output, so a flake is green but never silent. The check's timeout bounds both

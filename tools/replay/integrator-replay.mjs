@@ -207,6 +207,9 @@ export async function buildIntegrationClone({ integration, tmpRoot = tmpdir(), g
     await mustGit(['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', integration.root, ...refspecs], cloneDir, gitExecFn)
     await mustGit(['config', 'user.name', 'fleetmates-replay'], cloneDir, gitExecFn)
     await mustGit(['config', 'user.email', 'replay@fleetmates.invalid'], cloneDir, gitExecFn)
+    // The clone replays bytes as recorded: a global core.autocrlf=true would check files out as
+    // CRLF and turn a faithful session into a dirty or wrong tree.
+    await mustGit(['config', 'core.autocrlf', 'false'], cloneDir, gitExecFn)
     await mustGit(['checkout', '--quiet', integration.runBranch], cloneDir, gitExecFn)
   } catch (err) {
     await removeClone(cloneDir)
