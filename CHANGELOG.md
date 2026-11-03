@@ -35,6 +35,20 @@
   pending or unreadable.
 - Config keys `ci.push` (`ask` or `auto`, default `ask`) and `ci.waitMinutes` (1 to 720, default
   60), accepted by `config set` in either layer.
+- `cli.mjs ci-local [--dry-run]` mirrors the remote CI on this machine: it runs, in order, the
+  `run:` steps of every job in a push or pull request workflow whose runner is this OS, with the
+  step's shell, env and working directory and `GITHUB_ENV`/`GITHUB_PATH` carried between steps,
+  and stops at the first failure (exit 1). It skips and names `uses:` actions, other OSes, and the
+  expressions and `if:` conditions it cannot evaluate; exit 3 when nothing runs here. A global
+  git config file a step changes is restored after that step, and the run names it. The
+  `finishing-a-development-branch` Remote CI step runs it before any push.
+
+### Fixed
+
+- The flaky detector read a `>` inside a quoted report attribute, such as a file path, as the end
+  of the testcase tag, so the test did not match its quarantine entry.
+- The integrator replay tool's scratch clone pins `core.autocrlf=false`, so a global
+  `core.autocrlf=true` no longer checks the replayed files out as CRLF and fails a faithful session.
 
 ## v2.6.0
 

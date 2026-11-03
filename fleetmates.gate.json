@@ -4,7 +4,8 @@
     "default": {
       "fixRounds": 3,
       "checks": [
-        { "name": "test", "kind": "command", "run": "npm test" },
+        { "name": "test", "kind": "command", "run": "npm test", "platformSim": true, "flaky": true },
+        { "name": "hostile-tmpdir", "kind": "command", "run": "npm run test:hostile-tmpdir" },
         { "name": "hub-test", "kind": "command", "run": "npm ci --prefix hub --no-audit --no-fund && npm --prefix hub test" },
         { "name": "fileset", "kind": "fileset" },
         { "name": "ownership", "kind": "ownership" },
@@ -20,7 +21,8 @@
     "10": {
       "fixRounds": 3,
       "checks": [
-        { "name": "test", "kind": "command", "run": "npm test" },
+        { "name": "test", "kind": "command", "run": "npm test", "platformSim": true, "flaky": true },
+        { "name": "hostile-tmpdir", "kind": "command", "run": "npm run test:hostile-tmpdir" },
         { "name": "hub-test", "kind": "command", "run": "npm ci --prefix hub --no-audit --no-fund && npm --prefix hub test" },
         { "name": "fileset", "kind": "fileset" },
         { "name": "ownership", "kind": "ownership" },

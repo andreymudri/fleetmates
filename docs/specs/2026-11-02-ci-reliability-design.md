@@ -130,6 +130,28 @@ count a job skipped by `if:` as a failure. Whether the project has workflows is 
 tip commit's tree, not the working tree. A failure or timeout is reported with the job links and
 the merge is not offered. With no workflows, the step is skipped and the finish says so.
 
+### 5. Local CI mirror: `ci-local`
+
+Added 2026-11-02 after the first push of this feature spent a full CI round on failures a Linux
+machine could have shown: the hostile-TMPDIR sweep runs on Linux and was not run before the push.
+
+    node "<fleetmates root>/scripts/cli.mjs" ci-local --root <project root> [--dry-run]
+
+It reads the workflows that run on a branch push or a pull request (a tag-only workflow is a
+release, not CI, and is left out), takes each job whose `runs-on`, or `matrix.os` list, names this
+operating system, and runs the job's `run:` steps in order: the step's shell (bash on Linux and
+macOS and pwsh on Windows by default, as on a hosted runner), `env` from the workflow, the job and
+the step, `working-directory`, and `GITHUB_ENV` and `GITHUB_PATH` carried to the next step. It
+stops at the first failing step with exit 1. It skips and names what it cannot reproduce: `uses:`
+actions, expressions other than `matrix.os`, `runner.os` and `runner.temp`, `if:` conditions other
+than a `runner.os` comparison, other shells, and jobs for other operating systems. Exit 3 when
+nothing runs here. Steps run in the user's own environment, with no variable added beyond what a
+runner provides, so a test that points git at a fake `HOME` still works. A global git config file
+a step changes (a `git config --global` CI identity) is restored after that step, and named. A
+first version pointed `GIT_CONFIG_GLOBAL` at a scratch file instead, and that broke a hub test
+whose fixture configures git through a fake `HOME`. The finish runs it before
+any push and does not push on exit 1.
+
 ## Error handling
 
 - The simulator cannot create its symlink (Windows without the privilege): it skips that

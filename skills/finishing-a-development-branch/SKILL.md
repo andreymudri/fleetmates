@@ -139,6 +139,24 @@ silently.
 A local gate runs on one machine, and the project's GitHub Actions may run on others. Do this
 step after every phase's gate has passed again and before presenting the integration options.
 
+Before any push, run on this machine the CI steps this machine can run, so the remote CI confirms
+rather than discovers:
+
+    node "<fleetmates root>/scripts/cli.mjs" ci-local --root <project root> [--dry-run]
+
+It reads the workflows that run on a branch push or a pull request, takes each job whose
+`runs-on` (or `matrix.os` list) is this operating system, and runs that job's `run:` steps in
+order, with the step's shell, its `env`, its `working-directory`, and `GITHUB_ENV` and
+`GITHUB_PATH` carried to the next step, in the user's own environment. A `git config --global`
+step (a CI identity, say) is undone after its step: the global git config files are put back as
+they were, and the run names each one it restored. What it cannot reproduce it
+skips and names: a `uses:` action, an expression other than `matrix.os`, `runner.os` and
+`runner.temp`, an `if:` other than a `runner.os` comparison, an unusual shell, and every job for
+another operating system. Those are what the remote CI is still for. Exit 0 means every step it
+ran passed; exit 1 names the step that failed and nothing after it ran, so fix it before pushing,
+and do not push; exit 3 means no step runs on this machine, so say that the remote CI is the
+only check. `--dry-run` lists what would run and runs nothing.
+
 Ask the user before pushing the run branch, unless ci.push is auto, in which case push without
 asking. The `ci-wait` command only reads; it never pushes, so the push is this step's own action. If the user
 declines the push, remote CI was not read: say so, and present the run as unverified by CI.

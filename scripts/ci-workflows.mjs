@@ -38,10 +38,10 @@ function lines(text, unread) {
   return text.split(/\r?\n/).map((raw, i) => {
     if (raw.length > MAX_LINE_CHARS) {
       unread.push({ line: i + 1, reason: 'longer than 4 KiB' })
-      return { indent: 0, text: '' }
+      return { indent: 0, text: '', raw: '' }
     }
     const content = stripComment(raw).trimEnd()
-    return { indent: content.length - content.trimStart().length, text: content.trim() }
+    return { indent: content.length - content.trimStart().length, text: content.trim(), raw }
   })
 }
 
@@ -283,11 +283,173 @@ function readFlaky(ls) {
   return ls.some(l => FLAKY.test(l.text))
 }
 
+// Whether the workflow runs on a branch push or a pull request at all: the CI a local mirror
+// stands in for. A tag-only push, a release or a manual dispatch is not.
+function readTriggered(ls) {
+  const index = ls.findIndex(l => l.indent === 0 && /^("on"|'on'|on)\s*:/.test(l.text))
+  if (index === -1) return false
+  const kv = keyOf(ls[index])
+  const value = blockValue(kv.value, childrenOf(ls, index))
+  if (value === undefined) return false
+  const events = value.kind === 'scalar' ? [value.value] : value.kind === 'list' ? value.list : value.kind === 'map' ? Object.keys(value.map) : []
+  if (events.includes('pull_request')) return true
+  return readOn(ls) === true
+}
+
+// The indices of the lines nested under ls[index] (see childrenOf), blank lines left out.
+function childIndices(ls, index, base = ls[index].indent) {
+  const out = []
+  for (let j = index + 1; j < ls.length; j++) {
+    if (ls[j].text === '') continue
+    if (ls[j].indent <= base) break
+    out.push(j)
+  }
+  return out
+}
+
+// The `key: value` entries among `indices` at their shallowest indentation, in order, each with the
+// indices nested under it. `col` overrides that indentation, for the keys of a `- ` list item.
+function entriesAt(ls, indices, col) {
+  if (indices.length === 0) return []
+  const at = col ?? Math.min(...indices.map(i => ls[i].indent))
+  const out = []
+  for (let k = 0; k < indices.length; k++) {
+    const i = indices[k]
+    if (ls[i].indent !== at) continue
+    const kv = keyOf(ls[i])
+    if (!kv || kv.dash) continue
+    const nested = []
+    for (let j = k + 1; j < indices.length && ls[indices[j]].indent > at; j++) nested.push(indices[j])
+    out.push({ key: kv.key, value: kv.value, nested })
+  }
+  return out
+}
+
+// A scalar value: inline (quotes removed) or a `|` / `>` block scalar read from the raw lines, so a
+// `#` in a script is kept. Folded (`>`) joins lines with spaces, as YAML does for plain lines.
+function scalarOf(ls, entry) {
+  const v = entry.value
+  if (/^[|>][+-]?$/.test(v)) {
+    if (entry.nested.length === 0) return ''
+    const first = entry.nested[0]
+    const last = entry.nested[entry.nested.length - 1]
+    const indent = ls[first].raw.length - ls[first].raw.trimStart().length
+    const body = []
+    for (let j = first; j <= last; j++) body.push(ls[j].raw.slice(Math.min(indent, ls[j].raw.length - ls[j].raw.trimStart().length)))
+    return v[0] === '|' ? `${body.join('\n')}\n` : `${body.join(' ')}\n`
+  }
+  return unquote(v)
+}
+
+// A map of scalars (`env:` and the like), or null when an entry is not a scalar.
+function scalarMap(ls, entry) {
+  if (entry.value !== '') {
+    const v = parseFlow(entry.value)
+    if (v === null) return {}
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return null
+    const out = {}
+    for (const [k, x] of Object.entries(v)) { if (x !== null && typeof x === 'object') return null; out[k] = x ?? '' }
+    return out
+  }
+  const out = {}
+  for (const e of entriesAt(ls, entry.nested)) out[e.key] = scalarOf(ls, e)
+  return out
+}
+
+// The `- ` items of a block list under `entry`, each as the entries of its own keys.
+function listItems(ls, entry) {
+  const items = []
+  if (entry.nested.length === 0) return items
+  const dashCol = Math.min(...entry.nested.map(i => ls[i].indent))
+  const starts = entry.nested.filter(i => ls[i].indent === dashCol && ls[i].text.startsWith('-'))
+  for (const [n, start] of starts.entries()) {
+    const end = starts[n + 1] ?? Infinity
+    const rest = entry.nested.filter(i => i > start && i < end)
+    const after = ls[start].text.replace(/^-\s*/, '')
+    const col = ls[start].indent + (ls[start].text.length - after.length)
+    const own = []
+    if (after !== '') {
+      const kv = keyOf({ text: after, indent: col })
+      // The dash line's own key holds the deeper lines up to the item's next key.
+      const nextKey = rest.findIndex(i => ls[i].indent <= col)
+      if (kv) own.push({ key: kv.key, value: kv.value, nested: nextKey === -1 ? rest : rest.slice(0, nextKey) })
+    }
+    items.push([...own, ...entriesAt(ls, rest, col)])
+  }
+  return items
+}
+
+const get = (entries, key) => entries.find(e => e.key === key)
+
+// The jobs of a workflow, each with what a local run needs: the runner labels it can run on (its
+// `runs-on`, or the `os` list of its matrix when `runs-on` names `matrix.os`), its env, `if`,
+// default shell and working directory, and its steps. A job or step this cannot read is reported
+// with a reason instead of guessed.
+function readJobs(ls) {
+  const index = ls.findIndex(l => l.indent === 0 && /^jobs\s*:/.test(l.text))
+  const top = entriesAt(ls, ls.map((l, i) => i).filter(i => ls[i].text !== ''), 0)
+  const envEntry = get(top, 'env')
+  const env = envEntry ? scalarMap(ls, envEntry) : {}
+  if (index === -1) return { env, jobs: [] }
+  const jobs = []
+  for (const job of entriesAt(ls, childIndices(ls, index))) {
+    const keys = entriesAt(ls, job.nested)
+    const out = { id: job.key, labels: [], env: {}, if: null, shell: null, workingDirectory: null, steps: [], unreadable: null }
+    const runsOn = get(keys, 'runs-on')
+    const runsOnValue = runsOn ? (runsOn.value !== '' ? parseFlow(runsOn.value) : blockValue('', runsOn.nested.map(i => ls[i]))?.list) : undefined
+    let labels = runsOnValue === undefined || runsOnValue === null ? [] : Array.isArray(runsOnValue) ? runsOnValue : [runsOnValue]
+    if (labels.some(l => typeof l === 'string' && /^\$\{\{\s*matrix\.os\s*\}\}$/.test(l))) {
+      const matrix = get(entriesAt(ls, get(keys, 'strategy')?.nested ?? []), 'matrix')
+      const os = matrix && get(entriesAt(ls, matrix.nested), 'os')
+      const list = os ? (os.value !== '' ? parseFlow(os.value) : blockValue('', os.nested.map(i => ls[i]))?.list) : undefined
+      labels = Array.isArray(list) ? list.map(l => ({ label: l, matrixOs: l })) : []
+      if (labels.length === 0) out.unreadable = 'runs-on names matrix.os and its matrix has no readable os list'
+    } else {
+      labels = labels.map(l => ({ label: l, matrixOs: null }))
+    }
+    out.labels = labels
+    const jobEnv = get(keys, 'env')
+    if (jobEnv) { const m = scalarMap(ls, jobEnv); if (m === null) out.unreadable ??= 'its env is not a map of values'; else out.env = m }
+    const cond = get(keys, 'if')
+    if (cond) out.if = scalarOf(ls, cond)
+    const defaults = get(keys, 'defaults')
+    const run = defaults && get(entriesAt(ls, defaults.nested), 'run')
+    if (run) {
+      const r = entriesAt(ls, run.nested)
+      if (get(r, 'shell')) out.shell = scalarOf(ls, get(r, 'shell'))
+      if (get(r, 'working-directory')) out.workingDirectory = scalarOf(ls, get(r, 'working-directory'))
+    }
+    const steps = get(keys, 'steps')
+    if (get(keys, 'uses')) out.unreadable ??= 'it calls a reusable workflow'
+    else if (!steps) out.unreadable ??= 'it has no steps'
+    else {
+      for (const item of listItems(ls, steps)) {
+        const step = { name: null, run: null, uses: null, shell: null, workingDirectory: null, env: {}, if: null, unreadable: null }
+        for (const e of item) {
+          if (e.key === 'name') step.name = scalarOf(ls, e)
+          else if (e.key === 'run') step.run = scalarOf(ls, e)
+          else if (e.key === 'uses') step.uses = scalarOf(ls, e)
+          else if (e.key === 'shell') step.shell = scalarOf(ls, e)
+          else if (e.key === 'working-directory') step.workingDirectory = scalarOf(ls, e)
+          else if (e.key === 'if') step.if = scalarOf(ls, e)
+          else if (e.key === 'env') { const m = scalarMap(ls, e); if (m === null) step.unreadable = 'its env is not a map of values'; else step.env = m }
+        }
+        out.steps.push(step)
+      }
+    }
+    jobs.push(out)
+  }
+  return { env: env ?? {}, jobs }
+}
+
 export function readWorkflowText(text) {
   const unread = []
   const ls = lines(text, unread)
-  return { oses: readOses(ls), branchPushes: readOn(ls), usesFlaky: readFlaky(ls), unread }
+  return { oses: readOses(ls), branchPushes: readOn(ls), usesFlaky: readFlaky(ls), triggered: readTriggered(ls), ...readJobs(ls), unread }
 }
+
+// The OS a runner label names, or null: `ubuntu-latest` is linux, `macos-14` macos, and so on.
+export { osOf as runnerOs }
 
 // At most this many workflow files are read, in name order; the rest are listed in `skipped`.
 export const MAX_WORKFLOW_FILES = 64

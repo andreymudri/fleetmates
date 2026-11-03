@@ -60,6 +60,7 @@ import { rescueWorktree } from './rescue.mjs'
 import { appendEvent, ledgerPath, readEvents } from './event-ledger.mjs'
 import { readWorkflows, workflowSummary, ciAdvice } from './ci-workflows.mjs'
 import { buildSimEnv, runPlatformSim } from './platform-sim.mjs'
+import { runLocalCi } from './ci-local.mjs'
 import { runFlaky, readQuarantine, FlakyConfigError, RELEASE_STREAK, QUARANTINE_FILE } from './flaky.mjs'
 import { spawn as spawnChild, execFile } from 'node:child_process'
 
@@ -157,7 +158,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|platform-sim|flaky|ci-wait|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|platform-sim|flaky|ci-wait|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
@@ -211,6 +212,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   platform-sim [--root <path>] -- <command...>
   flaky    [--report <path>] [--root <path>] -- <command...>
   ci-wait  --branch <name> [--minutes <1-720>] [--root <path>]
+  ci-local [--dry-run] [--root <path>]
   config   list [--root <path>]
   config   get <key> [--root <path>]
   config   set <key> <value> [--root <path>] [--local]
@@ -575,6 +577,7 @@ export const REQUIRED = {
   'platform-sim': [],
   flaky: [],
   'ci-wait': ['branch'],
+  'ci-local': [],
   // Forwarded to the deck's own CLI, which belongs to no run; forwardDeck checks the subcommand.
   ui: [],
   deck: [],
@@ -647,6 +650,7 @@ export const KNOWN_FLAGS = {
   'platform-sim': [],
   flaky: ['report'],
   'ci-wait': ['branch', 'minutes'],
+  'ci-local': ['dry-run'],
   // Forwarded to hub/bin/fleetmates-deck.mjs; forwardDeck narrows these per deck subcommand.
   ui: [],
   deck: ['dry-run', 'rotate-token'],
@@ -7589,6 +7593,15 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`flaky: could not run ${printable(passthrough[0])}: ${printable(err.message)}`)
       return 127
     }
+  }
+
+  // `ci-local [--dry-run]`: runs, from the project root, the CI workflow steps this OS can run
+  // (scripts/ci-local.mjs). Exit 0 every step it ran passed, 1 a step failed, 3 nothing runs here.
+  // `--dry-run` lists what would run and what is skipped, and runs nothing.
+  if (command === 'ci-local') {
+    if (flags['dry-run'] !== undefined && flags['dry-run'] !== true) { io.out(`--dry-run takes no value\n\n${USAGE}`); return 2 }
+    const { code } = await runLocalCi(root, { dryRun: flags['dry-run'] === true, write: (line) => io.out(printable(line)) })
+    return code
   }
 
   // `ci-wait --branch <b> [--minutes <n>]`: waits for the remote CI of the branch's tip commit.
