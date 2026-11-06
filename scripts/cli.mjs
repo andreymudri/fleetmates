@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBrief } from './brief.mjs'
-import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks, reviewLenses } from './gate-config.mjs'
+import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
@@ -1764,10 +1764,15 @@ async function readSuppliedPhases(flags, io) {
 // is not its own canonical form is refused' in `tests/finish.test.mjs`; if it is ever loosened,
 // these keys need `printable` like every other quoted value here. The `phases` half of the
 // sentence is a list of integers `assignPhases` computed, never read from anything.
-function reportUnmatchedSuppliedPhases(io, supplied, phases) {
+//
+// The one non-numeric key that validator lets through is the literal `run`, which is this code's
+// own constant once matched. `withRun` says whether this run has a run entry to read it; without
+// one, a `run` block is unmatched evidence like any other.
+function reportUnmatchedSuppliedPhases(io, supplied, phases, { withRun = false } = {}) {
   const byPhase = supplied?.phases
   if (!byPhase || typeof byPhase !== 'object') return
   const real = new Set(phases.map((p) => String(p)))
+  if (withRun) real.add(RUN_PHASE)
   const unmatched = Object.keys(byPhase).filter((key) => !real.has(key))
   if (unmatched.length === 0) return
   io.out(
@@ -6048,14 +6053,25 @@ export async function runCli(argv, io = { out: console.log }) {
     // written by the agents being enforced, so a phase deleted from that file would simply not
     // be verified — the check would report on whatever remained and call the run finished.
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
-    reportUnmatchedSuppliedPhases(io, supplied, phases)
+    // The run entry: computed after the numbered phases, against the run tip, when the manifest
+    // scopes a review to the run or declares `phases.run` (`hasRunEntry`). Without either, `finish`
+    // is exactly what it was. Its supplied results are validated here, before any check runs, so a
+    // malformed run block is refused before minutes of phase checks rather than after them.
+    const runChecksList = hasRunEntry(config) ? checksForRun(config) : null
+    reportUnmatchedSuppliedPhases(io, supplied, phases, { withRun: runChecksList !== null })
+    const forRun = runChecksList ? suppliedForPhase(supplied, RUN_PHASE) : []
+    if (runChecksList) {
+      const invalid = validateSuppliedResults(forRun, runChecksList)
+      if (invalid) { io.out(`${RUN_PHASE}: ${invalid}`); return 2 }
+    }
+    const allChecks = [...phases.map((p) => checksForPhase(config, String(p))), ...(runChecksList ? [runChecksList] : [])]
 
     const enforcementOnly = flags['enforcement-only'] === true
     if (!enforcementOnly) {
-      const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'finish', total, phases.length)
+      const total = allChecks.reduce((n, checks) => n + commandChecks(checks).length, 0)
+      announceCommandChecks(io, 'finish', total, allChecks.length)
     }
-    announceInjected(io, 'finish', injectedNames(phases.flatMap((p) => checksForPhase(config, String(p)))))
+    announceInjected(io, 'finish', injectedNames(allChecks.flat()))
 
     const phaseResults = []
     for (const phase of phases) {
@@ -6075,6 +6091,13 @@ export async function runCli(argv, io = { out: console.log }) {
       // reported one. It changes no verdict: aggregateVerdict stays the only producer of those.
       const standing = results.filter((r) => r?.kind === 'inventory').flatMap((r) => r.standing ?? [])
       phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results), standing })
+    }
+    if (runChecksList) {
+      // `runEntry` builds the preview of the run tip with no task branch merged into it, so the
+      // `command` checks answer for the integrated run, and `fileset-run` diffs it against the
+      // anchor. The verdict is still `aggregateVerdict`'s, and an unsupplied review stays pending.
+      const results = mergeSuppliedResults(await runPhaseChecks(runChecksList, { ...ctx, runEntry: true }, enforcementOnly), forRun)
+      phaseResults.push({ phase: RUN_PHASE, supplied: forRun.length > 0, verdict: aggregateVerdict(results), standing: [] })
     }
 
     // No wrapper at this print site, because every value the table carries is wrapped where the

@@ -2325,7 +2325,11 @@ export async function runChecks(checks, ctx = {}) {
   // the first teammate of a 3-task phase to run `complete` gets every sibling's branch merged
   // into its preview, so a sibling's stray commit — or a sibling branch that does not exist
   // yet — fails the preview and reads to that teammate as "my own work is broken".
-  const phaseTasks = scopedPhaseTasks(ctx)
+  // `ctx.runEntry` is `finish`'s run entry: no task branch is merged, and the preview is built
+  // anyway (`always`), so its `command` checks run on a clean tree of the run tip rather than in the
+  // operator's own worktree. Its inventory is skipped like a phase with no branches: there is
+  // nothing merged to compare against the baseline, which would be the same tree.
+  const phaseTasks = ctx.runEntry === true ? [] : scopedPhaseTasks(ctx)
   const branches = []
   try {
     for (const task of phaseTasks) {
@@ -2354,6 +2358,7 @@ export async function runChecks(checks, ctx = {}) {
       // — on exactly the behaviour it had.
       base: ctx.runBranchRef ?? ctx.runBranch,
       branches,
+      always: ctx.runEntry === true,
       link: ctx.previewLink ?? [],
       repoRoot: ctx.cwd,
       // Every check runs inside this callback, so the worktree is alive for all of them and
@@ -2373,7 +2378,7 @@ export async function runChecks(checks, ctx = {}) {
         // the difference between "not previewing" and "previewing somewhere this code
         // failed to recognise".
         const listed = await runCheckList(checks, ctx, path ?? ctx.cwd, false, path)
-        return [merged, ...await withInventory(checks, listed, ctx, path === null ? { reason: INVENTORY_NO_BRANCHES } : {})]
+        return [merged, ...await withInventory(checks, listed, ctx, path === null || branches.length === 0 ? { reason: INVENTORY_NO_BRANCHES } : {})]
       },
     })
   } catch (err) {

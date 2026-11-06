@@ -15796,3 +15796,142 @@ test('prune-run keeps a worktree whose phase fails only an injected check', asyn
     assert.equal(hasWorktree(root, 'inj1'), true, lines.join('\n'))
   })
 })
+
+// --- finish computes the run entry (docs/specs/2026-11-06-cost-cuts-design.md, section 2) -----
+
+async function runScopedRun({ root, planPath, io, git: g }, checks = [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'run' }]) {
+  await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ lens: ['correctness'], phases: { default: { checks } } }), 'utf8')
+  g(['add', 'fleetmates.gate.json'])
+  g(['commit', '--quiet', '-m', 'manifest'])
+  absorbIntoBase(g)
+  await landTasks(g, root)
+}
+
+async function finishWith(root, io, results) {
+  const argv = ['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', root]
+  if (results === undefined) return runCli(argv, io)
+  // Under the ignored state directory: an untracked file at the root dirties the main worktree.
+  const file = path.join(root, '.fleetmates', 'r.json')
+  await writeFile(file, JSON.stringify(results), 'utf8')
+  return runCli([...argv, '--results', file], io)
+}
+
+test('finish moves a run-scoped review off the phases and onto the run, pending until supplied', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    repo.lines.length = 0
+    const code = await finishWith(repo.root, repo.io)
+    const out = repo.lines.join('\n')
+    assert.match(out, /^ {2}phase 1 {3}PASS$/m)
+    assert.match(out, /^ {2}phase 2 {3}PASS$/m)
+    assert.match(out, /^ {2}run {3}FAIL {3}pending: review$/m)
+    assert.match(out, /the run review is unverified/)
+    assert.match(out, /^finish: injected fileset, ownership, fileset-run /m)
+    // Unverified, not failed: the same 4 a phase with an unsupplied review exits with.
+    assert.equal(code, 4)
+  })
+})
+
+test('finish passes the run on a supplied run review', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    repo.lines.length = 0
+    const code = await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } } })
+    const out = repo.lines.join('\n')
+    assert.match(out, /^ {2}run {3}PASS \(review supplied\)$/m)
+    assert.match(out, /^every phase and the run gate pass/m)
+    assert.doesNotMatch(out, /which this run does not have/)
+    assert.equal(code, 0, out)
+  })
+})
+
+test('finish fails the run on a supplied failing run review', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    repo.lines.length = 0
+    const code = await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'fail', findings: [] }] } } })
+    assert.match(repo.lines.join('\n'), /^ {2}run {3}FAIL \(review supplied\) {3}failed: review$/m)
+    assert.equal(code, 1)
+  })
+})
+
+test('finish refuses a supplied fileset-run result, as it refuses fileset', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    for (const name of ['fileset-run', 'fileset']) {
+      repo.lines.length = 0
+      const code = await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name, status: 'pass' }] } } })
+      const out = repo.lines.join('\n')
+      assert.equal(code, 2, out)
+      assert.match(out, name === 'fileset-run'
+        ? /^run: --results may not supply a fileset-run check: fileset-run$/m
+        : /^run: --results names a check not in this phase's manifest: "fileset"$/m)
+      assert.doesNotMatch(out, /PASS/)
+    }
+  })
+})
+
+test('finish fails the run gate on a path no plan task declares', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    await writeFile(path.join(repo.root, 'stray.mjs'), 'x\n', 'utf8')
+    repo.git(['add', 'stray.mjs'])
+    repo.git(['commit', '--quiet', '-m', 'direct write'])
+    repo.lines.length = 0
+    const code = await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } } })
+    assert.match(repo.lines.join('\n'), /^ {2}run {3}FAIL \(review supplied\) {3}failed: fileset-run$/m)
+    assert.equal(code, 1)
+  })
+})
+
+// A file the main worktree holds and the run tip does not: a command check that ran where the
+// operator stands would see it, one that ran on the run tip cannot.
+test('finish runs the run entry\'s command checks on a tree of the run tip, not the main worktree', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo, [
+      { name: 'clean', kind: 'command', run: 'node -e "process.exit(require(\'fs\').existsSync(\'marker\') ? 1 : 0)"' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'run' },
+    ])
+    await writeFile(path.join(repo.root, '.git', 'info', 'exclude'), 'marker\n', 'utf8')
+    await writeFile(path.join(repo.root, 'marker'), 'x\n', 'utf8')
+    repo.lines.length = 0
+    const code = await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } } })
+    const out = repo.lines.join('\n')
+    assert.match(out, /^ {2}run {3}PASS \(review supplied\)$/m)
+    assert.match(out, /^finish: running 3 command checks across 3 phases/m)
+    assert.equal(code, 0, out)
+  })
+})
+
+test('finish keeps today\'s output for a phase-scoped manifest, and reports a run key it did not use', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo, [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }])
+    const review = [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }]
+    repo.lines.length = 0
+    const code = await finishWith(repo.root, repo.io, { phases: { 1: { results: review }, 2: { results: review }, run: { results: review } } })
+    const out = repo.lines.join('\n')
+    assert.doesNotMatch(out, /^ {2}run /m)
+    assert.doesNotMatch(out, /fileset-run/)
+    assert.match(out, /^--results supplies evidence for phase run, which this run does not have \(its phases are 1, 2\) — that evidence was not used$/m)
+    assert.match(out, /^every phase passes: the run branch is ready to land$/m)
+    assert.equal(code, 0, out)
+  })
+})
+
+// The run entry merges no branch, so its preview IS the baseline tree: comparing the two would run
+// the suite twice to learn nothing. Skipped by name, the way a phase with no branches is.
+test('finish skips the run entry\'s test inventory instead of re-running the suite as a baseline', async () => {
+  await withRepo(async (repo) => {
+    const junit = '<testsuites><testsuite name="s"><testcase classname="a.mjs" name="t"/></testsuite></testsuites>'
+    await runScopedRun(repo, [
+      { name: 'suite', kind: 'command', run: `node -e "require('fs').writeFileSync('r.xml', '${junit}')"`, report: { format: 'junit', path: 'r.xml' } },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'run' },
+    ])
+    repo.lines.length = 0
+    // Only the run row is pinned: the phases' own inventories judge this fixture's report, which
+    // is not what this test is about.
+    await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } } })
+    assert.match(repo.lines.join('\n'), /^ {2}run {3}PASS \(review supplied\) {3}skipped: suite:inventory$/m)
+  })
+})
