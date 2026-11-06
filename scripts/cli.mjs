@@ -4588,7 +4588,13 @@ export async function runCli(argv, io = { out: console.log }) {
     // (parseFlags's boolean-switch reading), which is the value missing, not a value — coerced
     // through it would render the literal `true` as a plan path or a branch name.
     const planPath = flags.plan === true ? '' : (flags.plan ?? '')
-    const baseBranch = flags.base === true ? '' : (flags.base ?? '')
+    // An absent `--base` is derived the way `doctor` derives it (the one of main/master that
+    // exists). Measured on an eval run: an orchestrator that did not pass `--base` dispatched a
+    // batched phase whose six teammates all stopped at step 0 asking for one. Ambiguous or
+    // absent, the derivation fails and the brief keeps its no-base variant, as before.
+    const baseBranch = flags.base === true
+      ? ''
+      : (flags.base ?? await resolveBaseBranch(createGit({ cwd: root }), undefined).catch(() => ''))
 
     const contextAnchor = {}
     const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)

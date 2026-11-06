@@ -42,6 +42,11 @@ reviewers about 17%. The changes below cut those two shares.
   review, and the controller builds the `run` entry of its finish results. Limit: on a run fix
   retry the controller stops with `run-fix-required` instead of running the round, and the fix
   route continues by hand.
+- `workflow` without `--base` derives the base branch (the one of main/master that exists), so a
+  phase is not dispatched with briefs that tell every teammate to stop and ask for one.
+- `parallel-execution/reference/headless.md`: in print mode, background tasks still running 10
+  minutes after the last turn are stopped; set `CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0` for a
+  headless fleet run (measured on Claude Code 2.1.306).
 - `workflow --out <file>` writes the generated script to the file and prints only its path and a
   one-line summary.
 - A self-inspection rule in the `parallel-execution` core: the orchestrator does not review diffs

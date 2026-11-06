@@ -438,6 +438,29 @@ test('workflow prints generated source for a phase', async () => {
   })
 })
 
+// Without `--base`, `workflow` derives the base the way `doctor` does (the one of main/master
+// that exists), so a phase is never dispatched with briefs that tell every teammate to stop and
+// ask for a base. Measured on an eval run: all six teammates of a batched phase stopped at step 0
+// because the orchestrator had not passed `--base`.
+test('workflow without --base derives the base branch for the briefs, and stays base-less when it is ambiguous', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    const bases = execFileSync('git', ['branch', '--list', 'main', 'master', '--format=%(refname:short)'], { cwd: root, encoding: 'utf8' }).trim().split('\n')
+    assert.equal(bases.length, 1, 'the fixture has exactly one of main/master')
+    const base = bases[0]
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+    let printed = lines.join('\n')
+    assert.ok(printed.includes(`git checkout -B fleetmates/r1/T1 ${base}`), 'the brief names the derived base')
+    assert.ok(!printed.includes('No base branch was supplied'))
+    execFileSync('git', ['branch', base === 'main' ? 'master' : 'main'], { cwd: root })
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+    printed = lines.join('\n')
+    assert.ok(printed.includes('No base branch was supplied'), 'ambiguous: the no-base variant, as before')
+  })
+})
+
 // `workflow --out` keeps the generated module out of the caller's context: the source goes to
 // the file, and stdout carries only the path and one summary line
 // (docs/specs/2026-11-06-cost-cuts-design.md, section 3).

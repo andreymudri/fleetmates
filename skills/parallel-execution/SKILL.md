@@ -46,7 +46,7 @@ once per run, then remember the answer for that run. Write the script to a file,
 `Workflow` with that file:
 
     node "<fleetmates root>/scripts/cli.mjs" workflow --run <runId> --phase <n> --root <project root> \
-      --models '{"cheap":"haiku","mid":"opus","capable":"opus"}' --out <file>
+      --base <base branch> --models '{"cheap":"haiku","mid":"opus","capable":"opus"}' --out <file>
 
 With `--out`, `workflow` prints only the file's path and a one-line summary, so the script stays
 out of your context. That holds for this command's output only: without `--out` it prints the
@@ -147,3 +147,4 @@ gate and the reviewers miss, you miss too.
 | The plan must change mid-run; a `## Not Yet Specified` entry becomes a task | `reference/plan-amendments.md` |
 | A phase fix round: the live teammate, or a `brief --fix-round` respawn | `reference/fix-rounds.md` |
 | The blast radius in a brief, or `map` | `reference/blast-radius-map.md` |
+| A headless run (print mode) | `reference/headless.md` |

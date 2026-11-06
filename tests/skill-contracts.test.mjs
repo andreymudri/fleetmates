@@ -2184,7 +2184,7 @@ test('parallel-execution, executing-plans and writing-plans each carry the plan 
 test('parallel-execution writes the Workflow script with --out, and states what that does not keep out', async () => {
   const dispatch = (await skill('parallel-execution')).doc.section(/^Dispatch a phase$/)
   assert.equal(dispatch.label, 'parallel-execution/SKILL.md § Dispatch a phase')
-  assertCode(dispatch, /cli\.mjs" workflow --run <runId> --phase <n> [^\n]*\\\n\s+--models '[^']+' --out <file>$/, 'the core workflow invocation must pass --out')
+  assertCode(dispatch, /cli\.mjs" workflow --run <runId> --phase <n> [^\n]*\\\n\s+--base <base branch> --models '[^']+' --out <file>$/, 'the core workflow invocation must pass --base and --out')
   assertClaim(dispatch, {
     label: 'workflow --out',
     claim: /^With --out, workflow prints only the file's path and a one-line summary, so the script stays out of your context\.$/,
@@ -2366,4 +2366,19 @@ test('parallel-execution states how a phase is batched and the three limits of b
   assert.deepEqual(section.statements.map((st) => st.text), BATCHES_CORE)
   assert.deepEqual(section.blocks.filter((b) => b.kind !== 'paragraph').map((b) => b.kind), [], 'the Batches section is one paragraph')
   assert.ok(files[0].text.includes('## Batches\n'), 'the Batches section lives in the core, which every run reads')
+})
+
+// Print mode stops background tasks 10 minutes after the orchestrator's last turn, which killed a
+// batched Workflow phase mid-task on an eval run. The reference states the measured fact, the
+// setting that lifts it, and the limit of the measurement; the core passes `--base` explicitly.
+test('the headless reference states the background-task stop, its setting and its limit', async () => {
+  const section = (await skill('parallel-execution')).doc.section(/^Running headless$/)
+  assert.equal(section.label, 'parallel-execution/reference/headless.md § Running headless')
+  assertClaim(section, {
+    label: 'headless background stop',
+    claim: /^Measured on Claude Code 2\.1\.306: in print mode \(the non-interactive session\), background tasks still running 10 minutes after the orchestrator's last turn are stopped, and a Workflow phase is a background task\.$/,
+    then: /^A batched phase can run longer than that with nothing to wake the orchestrator, since the watchdog is not started on the Workflow path, and the phase is then killed mid-task\.$/,
+  })
+  assertStatement(section, /^For a headless fleet run, set CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=0 in the session's environment, the setting Claude Code itself names for waiting indefinitely\.$/, 'the setting')
+  assertStatement(section, /^This was measured in print mode only, on that one version\.$/, 'the limit')
 })
