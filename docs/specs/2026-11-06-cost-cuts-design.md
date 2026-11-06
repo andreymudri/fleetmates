@@ -87,6 +87,10 @@ reviewers judge work against the plan.
   review for the run, and emits `review-run` and `collect-run` before `finish`. The controller
   builds the `run` entry of its finish results. Phases declared `scope: "phase"` keep their current
   steps.
+  - **Limit.** On a run-fix retry, the execution controller stops with `run-fix-required` instead
+    of running the round. `dispatch` refuses `--phase run`, and the host-bounded integration merges
+    only a phase's task branches. The orchestrator then runs the fix route by hand, as described
+    below.
 - **Fix route.**
   - `fix --phase run --verdict <file>` adjudicates the run gate as `fix` does for a phase today.
     On `retry` it emits one fix task: id `fix-<n>`, branch `fleetmates/<run>/fix-<n>` cut from the
