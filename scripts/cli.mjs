@@ -29,7 +29,7 @@ import {
 } from './config.mjs'
 import * as configModule from './config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
-import { decideFix } from './fix-loop.mjs'
+import { decideFix, decideRunFix, runFixRoundsUsed } from './fix-loop.mjs'
 import { defaultExec, runCommandCheck, runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
@@ -677,6 +677,22 @@ function unknownFlags(command, flags) {
 const NAMED_PHASE_REFUSAL = '__named_phase__'
 
 const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round', 'dispatch'])
+const RUN_FIX_COMMANDS = new Set(['fix', 'record-fix-round'])
+
+// The results a run verdict carries, or `undefined` when the document carries no run marker. Two
+// spellings carry it: a gate-shaped verdict whose `phase` is exactly `run` (what a caller builds
+// from the run entry, as the workflow controller does for a phase), and the `finish --results`
+// document `collect-reviews --phase run` writes, `{ "phases": { "run": { "results": [...] } } }`,
+// with no `phase` key beside it. A phase verdict carries neither, so it is never adjudicated as the
+// run, and a run verdict is never adjudicated as a phase (`fix` refuses both with exit 2).
+function runVerdictResults(verdict) {
+  if (!verdict || typeof verdict !== 'object' || Array.isArray(verdict)) return undefined
+  if (verdict.phase === RUN_PHASE) return verdict.results
+  if (Object.hasOwn(verdict, 'phase')) return undefined
+  const byPhase = verdict.phases
+  if (!byPhase || typeof byPhase !== 'object' || Array.isArray(byPhase) || !Object.hasOwn(byPhase, RUN_PHASE)) return undefined
+  return byPhase[RUN_PHASE]?.results
+}
 
 // `gate`'s exit when the only failed entries of its FAIL verdict are `derive` (no anchor or plan
 // state) and/or `run-state` (unreadable status.json or plan.json): no verdict about the code exists,
@@ -962,8 +978,12 @@ function missingArgs(command, flags, positional) {
   // comes back `escalate`/`unattributable` — "halt and ask the user" for what is only a
   // mistyped flag, with a genuine retry lost. `default` is the likeliest mistype of all: it
   // is the exact token `gate --phase` takes when omitted, and an operator carries it across.
+  // `fix` and `record-fix-round` also take the literal `run`: the run entry's fix route, whose
+  // rounds are counted under that key. `workflow` and `dispatch` dispatch plan tasks, and the run
+  // has none of its own, so for them `run` is refused like any other name.
   if (NUMERIC_PHASE_COMMANDS.has(command)
-    && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
+    && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))
+    && !(RUN_FIX_COMMANDS.has(command) && flags.phase === RUN_PHASE)) {
     // A `--no-fleet` gate names its phase from the manifest and emits a verdict carrying
     // `phaseName` with no integer `phase`, so this refusal is the whole of what an operator
     // following the phase-gate skill end to end sees. Reported as a boundary rather than as a
@@ -7542,6 +7562,56 @@ export async function runCli(argv, io = { out: console.log }) {
       return 1
     }
 
+    // THE RUN FIX ROUTE (`--phase run`): the run entry's verdict becomes one fix task, `fix-<n>`,
+    // on `fleetmates/<run>/fix-<n>` cut from the run tip (`decideRunFix`). The verdict must carry
+    // the run marker (`runVerdictResults`); rounds come from the run's own counter, which
+    // `record-fix-round --phase run` writes; the budget is `phases.run`'s `fixRounds`, else the
+    // default block's, capped at two.
+    if (flags.phase === RUN_PHASE) {
+      const runResults = runVerdictResults(verdict)
+      if (runResults === undefined) {
+        io.out(`--phase run needs a run verdict, and ${printable(flags.verdict)} carries no run marker: a run verdict has "phase": "run", or is the { "phases": { "run": ... } } file collect-reviews --phase run writes\n\n${USAGE}`)
+        return 2
+      }
+      const runConfig = await resolveGateConfig(root, io)
+      if (runConfig === GATE_CONFIG_REJECTED) return 2
+      const reviews = checksForRun(runConfig ?? {}).filter((check) => kindOf(check) === 'agent')
+      const decision = decideRunFix({ results: runResults }, {
+        runId,
+        tasks: Array.isArray(plan.tasks) ? plan.tasks : [],
+        rounds: readFixRounds(status, RUN_PHASE),
+        fixRounds: fixRoundsForPhase(runConfig ?? {}, RUN_PHASE),
+        blockOn: Object.fromEntries(reviews.map((check) => [check.name, Array.isArray(check.blockOn) ? check.blockOn : ['high']])),
+      })
+      if (decision.decision === 'retry') {
+        // The fix branch is cut from the run tip as it stands: the run branch HEAD names, the same
+        // branch `review-dispatch --phase run` reviewed. Read from git, never from run state.
+        let head
+        try {
+          const git = createGit({ cwd: root })
+          head = await git.headBranch()
+          if (head.ok) head = { ...head, sha: await git.resolveRef(head.ref) }
+        } catch (err) {
+          if (!(err instanceof GitError)) throw err
+          io.out(`cannot read the run tip to cut the fix branch from: ${printable(err.message)}`)
+          return 1
+        }
+        if (!head.ok) {
+          io.out(`${head.reason} — there is no run tip to cut the fix branch from; check out the run branch and re-run`)
+          return 1
+        }
+        for (const task of decision.tasks) task.cutFrom = `${printable(head.name)}@${head.sha}`
+      }
+      // Wrapped: the findings are a reviewer's own text, and `JSON.stringify` leaves the C1 range
+      // and U+2028/U+2029 raw, so a finding could otherwise draw a line of its own.
+      io.out(printableBlock(JSON.stringify({ ...decision, phase: RUN_PHASE }, null, 2)))
+      return 0
+    }
+    if (runVerdictResults(verdict) !== undefined) {
+      io.out(`--phase ${printable(flags.phase)} does not match the run verdict at ${printable(flags.verdict)}: adjudicate it with --phase run\n\n${USAGE}`)
+      return 2
+    }
+
     // Validated as an integer by missingArgs, then normalised: `--phase 01` and `--phase 1`
     // must select the same tasks and read the same round counter, not two disjoint string
     // keys. Every phase comparison below this line is numeric.
@@ -7606,6 +7676,21 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
     const status = await readState(root, runId, 'status')
     if (!status) { io.out(`no status for run ${runId}`); return 1 }
+
+    // The run's fix rounds: one `fix-<n>` task per round, numbered by the rounds already recorded,
+    // so only the next one may be recorded. Recording the same dispatch twice would spend a round
+    // no retry used, which is what keeping this write separate from `fix` exists to prevent.
+    if (flags.phase === RUN_PHASE) {
+      const expected = `fix-${runFixRoundsUsed(readFixRounds(status, RUN_PHASE)) + 1}`
+      if (flags.task !== expected) {
+        io.out(`the next run fix task is ${expected}, not ${printable(flags.task)} — record a run fix round once, when that task is dispatched`)
+        return 1
+      }
+      const next = recordFixRound(status, RUN_PHASE, flags.task)
+      await writeState(root, runId, 'status', next)
+      io.out(`${flags.task} run round ${runFixRoundsUsed(readFixRounds(next, RUN_PHASE))}`)
+      return 0
+    }
 
     // A round is spent against a budget that belongs to one task in one phase, so the pair
     // must exist in the plan. This also keeps an arbitrary caller-supplied string — say
