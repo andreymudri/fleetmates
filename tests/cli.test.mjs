@@ -2237,7 +2237,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 151, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 154, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2437,10 +2437,16 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **171 lines: 151 in `cli.mjs`, 7 in
+// can no longer drift away from the code unnoticed. It came to **174 lines: 154 in `cli.mjs`, 7 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **6 sites in `cli.mjs`**, the run fix route (`fix --phase run` and
+// The most recent move was **3 sites in `cli.mjs`**, `workflow --out`: the cannot-write refusal (the
+// resolved `--out` path, argv, and the fs error that quotes it), the path line it prints instead of
+// the source, and the summary line (the `--run` id). Driven by "workflow --out writes the generated
+// source to the file and prints only its path and a summary line" and its refusal sibling, which
+// pin the lines' shape rather than the wrapping.
+//
+// The move before that was **6 sites in `cli.mjs`**, the run fix route (`fix --phase run` and
 // `record-fix-round --phase run`). `fix`: the missing-run-marker refusal and the run-verdict
 // mismatch refusal (the `--verdict` path and the `--phase` value, argv), the cannot-read-the-run-
 // tip line (a git error), the `cutFrom` stamp (the run branch name, which whoever created the

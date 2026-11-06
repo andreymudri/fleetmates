@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { expandWorkflowProfile, profileTaskResultAccepted, PROFILE_LIMITS } from '../scripts/workflow-profile.mjs'
 const markdown = '### Task 1: First\n\n**Files:**\n- Modify: `src/first.mjs`\n\n**Acceptance:**\nRegression covered.\n'
-const manifestText = JSON.stringify({ phases: { default: { fixRounds: 1, checks: [{ name: 'test', kind: 'command', run: 'npm test' }, { name: 'review', kind: 'agent', blockOn: ['high'] }] } } })
+const manifestText = JSON.stringify({ phases: { default: { fixRounds: 1, checks: [{ name: 'test', kind: 'command', run: 'npm test' }, { name: 'review', kind: 'agent', blockOn: ['high'], scope: 'phase' }] } } })
 const hash = value => createHash('sha256').update(value).digest('hex')
 const input = { profile: 'bug-fix', runId: 'r1', planPath: 'plan.md', baseBranch: 'feat/deck', harness: 'codex', inputs: { commit: 'a'.repeat(40), plan: hash(markdown), manifest: hash(manifestText), environment: 'e', verifier: 'v' }, markdown, manifestText, capabilities: { harness: 'available' } }
 test('reusable workflow expansion preserves mandatory checks, actual CLI steps and tracked repair limits', () => {
