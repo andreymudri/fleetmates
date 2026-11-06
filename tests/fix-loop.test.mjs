@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decideFix } from '../scripts/fix-loop.mjs'
+import { decideFix, decideRunFix, runFixRoundsUsed } from '../scripts/fix-loop.mjs'
 import { aggregateVerdict } from '../scripts/gate-runner.mjs'
 
 function makePhase() {
@@ -595,4 +595,133 @@ test('an inherited numeric round count is not borrowed, so the own-key check is 
   const result = decideFix(verdict, 1, tasks, rounds, { fixRounds: 2 })
   assert.equal(result.decision, 'retry')
   assert.equal(result.tasks[0].round, 1)
+})
+
+// --- the run fix route (docs/specs/2026-11-06-cost-cuts-design.md, section 2) -------------------
+// A blocking run finding is not one task's to retry: the run review judged the integrated diff.
+// It becomes ONE fix task, `fix-<n>`, on `fleetmates/<run>/fix-<n>`, whose file set is the paths
+// the blocking findings cite that some plan task declares. Two rounds at most, then escalation.
+
+function runVerdict(results) {
+  return { ...emitVerdict(results, 'run'), phase: 'run' }
+}
+
+const RUN_TASKS = [
+  { id: 'T1', files: ['src/a.mjs'], tier: 'cheap', phase: 1 },
+  { id: 'T2', files: ['src/b.mjs', 'docs/b.md'], tier: 'mid', phase: 2 },
+]
+
+function decideRun(results, opts = {}) {
+  return decideRunFix(runVerdict(results), { runId: 'r1', tasks: RUN_TASKS, rounds: {}, fixRounds: 2, ...opts })
+}
+
+test('a blocking run finding becomes one fix task with the declared paths it cites as its file set', () => {
+  const findings = [
+    { severity: 'high', file: 'src/b.mjs', line: 3, summary: 'off by one' },
+    { severity: 'high', file: '/work/repo/src/a.mjs', line: 9, summary: 'unchecked input' },
+    // Below the blocking severity: not part of the brief, and its path is not added to the set.
+    { severity: 'low', file: 'docs/b.md', line: 1, summary: 'typo' },
+  ]
+  const result = decideRun([agentCheck('review', findings)])
+  assert.equal(result.decision, 'retry')
+  assert.equal(result.reason, null)
+  assert.equal(result.tasks.length, 1)
+  const [task] = result.tasks
+  assert.equal(task.taskId, 'fix-1')
+  assert.equal(task.branch, 'fleetmates/r1/fix-1')
+  assert.equal(task.round, 1)
+  assert.deepEqual(task.files, ['src/a.mjs', 'src/b.mjs'])
+  assert.deepEqual(task.findings, findings.slice(0, 2))
+  assert.deepEqual(task.checks, ['review'])
+  // The most capable tier among the declaring tasks, escalated one step, as a phase retry does.
+  assert.equal(task.tier, 'capable')
+})
+
+test('the blocking severities are the review check\'s blockOn', () => {
+  const findings = [{ severity: 'medium', file: 'src/a.mjs', line: 1 }, { severity: 'high', file: 'src/b.mjs', line: 1 }]
+  const result = decideRun([agentCheck('review', findings)], { blockOn: { review: ['medium'] } })
+  assert.equal(result.decision, 'retry')
+  assert.deepEqual(result.tasks[0].files, ['src/a.mjs'])
+})
+
+test('a blocking run finding citing a path no plan task declares escalates at once', () => {
+  const result = decideRun([agentCheck('review', [
+    { severity: 'high', file: 'src/a.mjs', line: 1 },
+    { severity: 'high', file: 'src/stray.mjs', line: 2 },
+  ])])
+  assert.equal(result.decision, 'escalate')
+  assert.equal(result.reason, 'undeclared-path')
+  assert.equal(result.file, 'src/stray.mjs')
+  assert.deepEqual(result.tasks, [])
+})
+
+test('a blocking run finding citing no path at all escalates as undeclared', () => {
+  const result = decideRun([agentCheck('review', [{ severity: 'high', summary: 'somewhere' }])])
+  assert.equal(result.decision, 'escalate')
+  assert.equal(result.reason, 'undeclared-path')
+})
+
+// A failing review whose findings sit below the blocking severity names nothing to fix: escalate
+// rather than retry an empty brief.
+test('a failing run review with no blocking finding escalates as unattributable', () => {
+  const result = decideRun([agentCheck('review', [{ severity: 'low', file: 'src/a.mjs' }])])
+  assert.equal(result.decision, 'escalate')
+  assert.equal(result.reason, 'unattributable')
+  assert.equal(result.check, 'review')
+})
+
+test('a failing run command check is attributed by the declared paths its output names', () => {
+  const result = decideRun([commandCheck('test', 'not ok 3 - src/b.mjs:12 expected 1')])
+  assert.equal(result.decision, 'retry')
+  assert.deepEqual(result.tasks[0].files, ['src/b.mjs'])
+  assert.deepEqual(result.tasks[0].findings, [])
+  const silent = decideRun([commandCheck('test', 'segmentation fault')])
+  assert.equal(silent.decision, 'escalate')
+  assert.equal(silent.reason, 'unattributable')
+})
+
+test('a failing fileset-run check is a process violation, never a fix task', () => {
+  const result = decideRun([
+    { name: 'fileset-run', kind: 'fileset-run', status: 'fail', output: 'outside', optional: true },
+    agentCheck('review', [{ severity: 'high', file: 'src/a.mjs' }]),
+  ])
+  assert.equal(result.decision, 'escalate')
+  assert.equal(result.reason, 'process-violation')
+  assert.equal(result.check, 'fileset-run')
+})
+
+test('a passing run verdict decides none', () => {
+  const result = decideRun([{ name: 'review', kind: 'agent', status: 'pass', findings: [], optional: false }])
+  assert.equal(result.decision, 'none')
+})
+
+test('a run verdict whose results are not a list escalates as malformed', () => {
+  const result = decideRunFix({ phase: 'run', results: {} }, { runId: 'r1', tasks: RUN_TASKS, rounds: {}, fixRounds: 2 })
+  assert.equal(result.decision, 'escalate')
+  assert.equal(result.reason, 'malformed-verdict')
+})
+
+test('the run fix round numbers the next task, and escalates at the cap of two', () => {
+  const failing = [agentCheck('review', [{ severity: 'high', file: 'src/a.mjs' }])]
+  const second = decideRun(failing, { rounds: { 'fix-1': 1 } })
+  assert.equal(second.decision, 'retry')
+  assert.equal(second.tasks[0].taskId, 'fix-2')
+  assert.equal(second.tasks[0].branch, 'fleetmates/r1/fix-2')
+  assert.equal(second.tasks[0].round, 2)
+  const third = decideRun(failing, { rounds: { 'fix-1': 1, 'fix-2': 1 } })
+  assert.equal(third.decision, 'escalate')
+  assert.equal(third.reason, 'budget-exhausted')
+  // Capped at two whatever the manifest allows.
+  assert.equal(decideRun(failing, { rounds: { 'fix-1': 1, 'fix-2': 1 }, fixRounds: 5 }).decision, 'escalate')
+  // And lower when the manifest says so.
+  const once = decideRun(failing, { rounds: { 'fix-1': 1 }, fixRounds: 1 })
+  assert.equal(once.decision, 'escalate')
+  assert.equal(once.reason, 'budget-exhausted')
+})
+
+test('only own fix-<n> counts are run fix rounds', () => {
+  assert.equal(runFixRoundsUsed({ 'fix-1': 1, 'fix-2': 1 }), 2)
+  assert.equal(runFixRoundsUsed({ T1: 3, 'fix-01': 1, 'fix-x': 1, 'fix-1': 'a' }), 0)
+  assert.equal(runFixRoundsUsed(Object.create({ 'fix-1': 1 })), 0)
+  assert.equal(runFixRoundsUsed(null), 0)
 })
