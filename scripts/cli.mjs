@@ -204,7 +204,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   unclaim  --run <id> --task <id> [--root <path>]
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
   brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
-  workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
+  workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>] [--out <path>]
   dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>] [--fix-round --task <id>...] [--execution <absolute-json-path>]
   dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   dispatch-integrator --run <id> [--isolated-legacy] [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
@@ -611,7 +611,7 @@ export const KNOWN_FLAGS = {
   locate: ['run', 'task', 'worktree', 'branch'],
   brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
-  workflow: ['run', 'phase', 'models', 'plan', 'base'],
+  workflow: ['run', 'phase', 'models', 'plan', 'base', 'out'],
   dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy', 'fix-round', 'task', 'execution'],
   'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy'],
   'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy', 'isolated-legacy'],
@@ -1010,6 +1010,12 @@ function missingArgs(command, flags, positional) {
   if (RESULTS_COMMANDS.has(command)
     && (flags.results === true || (typeof flags.results === 'string' && flags.results.trim() === ''))) {
     missing.push('--results <path>')
+  }
+  // `workflow --out` the same way: a valueless or empty one would otherwise print the source to
+  // stdout, the very context the flag exists to keep it out of, with nothing said about why.
+  if (command === 'workflow' && flags.out !== undefined
+    && (flags.out === true || (typeof flags.out === 'string' && flags.out.trim() === ''))) {
+    missing.push('--out <path>')
   }
   return missing
 }
@@ -4646,7 +4652,26 @@ export async function runCli(argv, io = { out: console.log }) {
       caveman: resolved.caveman,
       effort: resolved.agents.implementer.effort ?? '',
     })
-    io.out(src)
+    if (flags.out === undefined) {
+      io.out(src)
+      return 0
+    }
+    // `--out`: the source goes to the file and stdout carries only its path and one summary line,
+    // so the generated module never enters the context of whoever ran this. Resolved against
+    // `--root`, as `--plan` is, and written temp-then-rename so a reader never sees half a module.
+    const outPath = path.resolve(root, flags.out)
+    const temporary = `${outPath}.${process.pid}.tmp`
+    try {
+      await mkdir(path.dirname(outPath), { recursive: true })
+      await writeFile(temporary, `${src}\n`, { encoding: 'utf8', flag: 'wx' })
+      await rename(temporary, outPath)
+    } catch (err) {
+      await unlink(temporary).catch(() => {})
+      io.out(`cannot write the workflow to ${printable(outPath)}: ${printable(err.message)}`)
+      return 4
+    }
+    io.out(printable(outPath))
+    io.out(`workflow for run ${printable(runId)}, phase ${phase}: ${phaseTasks.length} task${phaseTasks.length === 1 ? '' : 's'}`)
     return 0
   }
 

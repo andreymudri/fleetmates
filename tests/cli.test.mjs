@@ -438,6 +438,45 @@ test('workflow prints generated source for a phase', async () => {
   })
 })
 
+// `workflow --out` keeps the generated module out of the caller's context: the source goes to
+// the file, and stdout carries only the path and one summary line
+// (docs/specs/2026-11-06-cost-cuts-design.md, section 3).
+test('workflow --out writes the generated source to the file and prints only its path and a summary line', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], io), 0)
+    const printed = lines.join('\n')
+    assert.match(printed, /export const meta = \{/, 'without --out the source is printed as before')
+    lines.length = 0
+    // Relative to --root, as --plan is.
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--out', 'wf/phase-1.mjs'], io), 0)
+    const file = path.join(root, 'wf', 'phase-1.mjs')
+    assert.deepEqual(lines, [file, 'workflow for run r1, phase 1: 1 task'])
+    assert.equal(await readFile(file, 'utf8'), `${printed}\n`, 'the file holds exactly the source stdout would have carried')
+    lines.length = 0
+    const absolute = path.join(root, 'abs.mjs')
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--out', absolute], io), 0)
+    assert.deepEqual(lines, [absolute, 'workflow for run r1, phase 1: 1 task'])
+  })
+})
+
+test('workflow refuses a valueless or empty --out, and reports a file it cannot write', async () => {
+  await withRepo(async ({ root, planPath, io, lines }) => {
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    for (const tail of [['--out'], ['--out', ''], ['--out', '  ']]) {
+      lines.length = 0
+      assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, ...tail], io), 2, tail.join(' '))
+      assert.match(lines.join('\n'), /^missing required argument: --out <path>/, tail.join(' '))
+    }
+    lines.length = 0
+    await mkdir(path.join(root, 'taken'))
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--out', 'taken'], io), 4)
+    assert.match(lines.join('\n'), /^cannot write the workflow to .*taken: /)
+    assert.ok(!lines.join('\n').includes('export const meta'), 'a failed write prints no source either')
+  })
+})
+
 test('init-run uses maxParallel from the gate manifest when present', async () => {
   await withRepo(async ({ root, planPath, io }) => {
     await writeFile(
