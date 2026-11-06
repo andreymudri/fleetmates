@@ -1194,7 +1194,7 @@ test('a command check\'s report takes exactly one of dir: true and a repo-relati
   }
 })
 
-test('an agent check\'s scope is "phase" or "run", and is refused anywhere else', () => {
+test('an agent check\'s scope is "phase" or "run", any other value is refused, and other kinds are left alone', () => {
   const phases = (check) => ({ default: { checks: [{ name: 'test', kind: 'command', run: 'x' }, check] } })
   for (const scope of ['phase', 'run']) {
     assert.doesNotThrow(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'review', kind: 'agent', scope })), scope)
@@ -1204,10 +1204,10 @@ test('an agent check\'s scope is "phase" or "run", and is refused anywhere else'
     assert.throws(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'review', kind: 'agent', scope })),
       (err) => err instanceof ConfigError && err.message.startsWith('phases.default.checks[1].scope must be "phase" or "run"'), JSON.stringify(scope))
   }
-  // A scope on a check that is not a review would be ignored, and an ignored key reads as obeyed.
+  // Only a review has a scope. On any other kind the gate ignores the field, like every per-check
+  // field that would narrow an enforcement check, so it is not refused there either.
   for (const kind of ['command', 'fileset', 'mcp']) {
-    assert.throws(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'x', kind, run: 'y', scope: 'run' })),
-      (err) => err instanceof ConfigError && err.message.startsWith('phases.default.checks[1].scope applies to agent checks only'), kind)
+    assert.doesNotThrow(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'x', kind, run: 'y', scope: 'none' })), kind)
   }
 })
 

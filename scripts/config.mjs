@@ -120,10 +120,11 @@ export function reportPathParts(value) {
 
 // Where a review runs (`reviewScope` in scripts/gate-config.mjs). Refused rather than defaulted: a
 // misspelt `scope` would otherwise move a review between the phase gates and the run gate without a
-// word. Only an `agent` check takes one; on any other kind it would be ignored, and an ignored key
-// reads to the operator as obeyed.
+// word. Checked on `agent` checks only, the one kind it means anything on. On any other kind the
+// gate ignores it, as it ignores every per-check field that would narrow an enforcement check
+// (tests/adversarial.test.mjs carries a `fileset` entry with `scope: "none"` that must still fail
+// the gate, not be refused before it runs).
 function validateScope(check, where) {
-  if (check.kind !== 'agent') throw new ConfigError(`${where} applies to agent checks only, got it on kind ${JSON.stringify(check.kind)}`)
   if (!REVIEW_SCOPES.includes(check.scope)) {
     throw new ConfigError(`${where} must be "phase" or "run", got ${JSON.stringify(check.scope)}`)
   }
@@ -155,7 +156,7 @@ export const ENFORCEMENT_VALIDATORS = {
         if (check !== null && typeof check === 'object' && check.report !== undefined) {
           validateReport(check.report, `phases.${name}.checks[${i}].report`)
         }
-        if (check !== null && typeof check === 'object' && check.scope !== undefined) {
+        if (check !== null && typeof check === 'object' && check.kind === 'agent' && check.scope !== undefined) {
           validateScope(check, `phases.${name}.checks[${i}].scope`)
         }
       }
