@@ -60,12 +60,13 @@ test('inferGateConfig orders typecheck, lint, test, build', () => {
   assert.deepEqual(names, ['typecheck', 'lint', 'test', 'build'])
 })
 
-test('inferGateConfig always appends the review agent check', () => {
+test('inferGateConfig always appends the review agent check, scoped to the run in so many words', () => {
   const config = inferGateConfig({})
   const review = config.phases.default.checks.at(-1)
   assert.equal(review.kind, 'agent')
   assert.equal(review.agent, 'tm-reviewer')
   assert.deepEqual(review.blockOn, ['high'])
+  assert.equal(review.scope, 'run')
 })
 
 test('inferGateConfig sets a maxParallel default', () => {
@@ -169,7 +170,7 @@ test('previewLinks returns [] when link is not an array', () => {
 })
 
 test('checksForPhase keeps an agent check that already has its own lens untouched', () => {
-  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['tests'] }
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase', lens: ['tests'] }
   const config = { lens: ['correctness'], phases: { default: { checks: [check] } } }
   const [result] = checksForPhase(config, 'default')
   assert.equal(result, check)
@@ -177,14 +178,14 @@ test('checksForPhase keeps an agent check that already has its own lens untouche
 })
 
 test('checksForPhase gives an agent check with no lens the manifest top-level lens', () => {
-  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer' }
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase' }
   const config = { lens: ['correctness'], phases: { default: { checks: [check] } } }
   const [result] = checksForPhase(config, 'default')
   assert.deepEqual(result.lens, ['correctness'])
 })
 
 test('checksForPhase falls back to DEFAULT_LENS when neither the check nor the manifest has a lens', () => {
-  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer' }
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase' }
   const config = { phases: { default: { checks: [check] } } }
   const [result] = checksForPhase(config, 'default')
   assert.deepEqual(result.lens, ['correctness', 'security', 'tests'])
@@ -198,7 +199,7 @@ test('checksForPhase returns a command check unchanged, same object identity', (
 })
 
 test('checksForPhase falls back to DEFAULT_LENS when the top-level lens is empty', () => {
-  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer' }
+  const check = { name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase' }
   const config = { lens: [], phases: { default: { checks: [check] } } }
   const [result] = checksForPhase(config, 'default')
   assert.deepEqual(result.lens, ['correctness', 'security', 'tests'])
@@ -304,8 +305,9 @@ const REVIEW = { name: 'review', kind: 'agent', agent: 'tm-reviewer' }
 const runReview = { ...REVIEW, scope: 'run' }
 const phaseReview = { ...REVIEW, scope: 'phase' }
 
-test('the default review scope stays phase until the run review is wired end to end', () => {
-  assert.equal(DEFAULT_REVIEW_SCOPE, 'phase')
+test('an agent check with no scope is run-scoped by default', () => {
+  assert.equal(DEFAULT_REVIEW_SCOPE, 'run')
+  assert.equal(reviewScope(REVIEW), 'run')
 })
 
 test('reviewScope returns a declared phase or run, and the default for anything else', () => {
@@ -325,9 +327,10 @@ test('checksForPhase leaves out a run-scoped agent check and keeps a phase-scope
   assert.deepEqual(kept.map((c) => c.name), ['test', 'review', 'fileset', 'ownership'])
 })
 
-test('checksForPhase keeps an unscoped agent check while the default scope is phase', () => {
-  const checks = checksForPhase({ phases: { default: { checks: [REVIEW] } } }, '1')
-  assert.deepEqual(checks.map((c) => c.name), ['review', 'fileset', 'ownership'])
+test('checksForPhase leaves out an unscoped agent check, and checksForRun carries it', () => {
+  const config = { phases: { default: { checks: [REVIEW] } } }
+  assert.deepEqual(checksForPhase(config, '1').map((c) => c.name), ['fileset', 'ownership'])
+  assert.deepEqual(checksForRun(config).map((c) => c.name), ['review', 'fileset-run'])
 })
 
 test('checksForRun takes the default block\'s command checks and run-scoped reviews, plus fileset-run', () => {
@@ -388,7 +391,8 @@ test('checksForRun hands a report-bearing command check the top-level skips', ()
 })
 
 test('hasRunEntry is true only for a run-scoped review or a declared phases.run', () => {
-  assert.equal(hasRunEntry({ phases: { default: { checks: [REVIEW, phaseReview] } } }), false)
+  assert.equal(hasRunEntry({ phases: { default: { checks: [phaseReview] } } }), false)
+  assert.equal(hasRunEntry({ phases: { default: { checks: [REVIEW] } } }), true)
   assert.equal(hasRunEntry({ phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'x', scope: 'run' }] } } }), false)
   assert.equal(hasRunEntry({}), false)
   assert.equal(hasRunEntry(null), false)

@@ -64,10 +64,13 @@ export function inferGateConfig(pkg, { platform = process.platform } = {}) {
   checks.push({ name: 'fileset', kind: 'fileset' })
   checks.push({ name: 'ownership', kind: 'ownership' })
 
+  // `scope` is written out although it is the default: the manifest the user confirms then says
+  // where the review runs, rather than leaving it to a default a later version could change.
   checks.push({
     name: 'review',
     kind: 'agent',
     agent: 'tm-reviewer',
+    scope: 'run',
     blockOn: ['high'],
   })
 
@@ -126,7 +129,7 @@ export function reviewLenses(config, phaseName, summary) {
 // one of the two, takes the default; `validateGate` refuses any other value in the tracked
 // manifest, so only a programmatic caller reaches the fallback with one.
 export const REVIEW_SCOPES = ['phase', 'run']
-export const DEFAULT_REVIEW_SCOPE = 'phase'
+export const DEFAULT_REVIEW_SCOPE = 'run'
 export const RUN_PHASE = 'run'
 
 export function reviewScope(check) {

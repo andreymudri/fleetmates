@@ -1353,7 +1353,7 @@ test('--results naming a check the manifest declares twice is rejected rather th
       { name: 'fileset', kind: 'fileset' },
       { name: 'ownership', kind: 'ownership' },
       { name: 'review', kind: 'command', run: 'node -e ""' },
-      { name: 'review', kind: 'agent' },
+      { name: 'review', kind: 'agent', scope: 'phase' },
     ])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
 
@@ -1369,7 +1369,7 @@ test('--results cannot declare a failing review optional and turn the verdict in
     await commitManifest(root, [
       { name: 'fileset', kind: 'fileset' },
       { name: 'ownership', kind: 'ownership' },
-      { name: 'review', kind: 'agent' },
+      { name: 'review', kind: 'agent', scope: 'phase' },
     ])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
 
@@ -1397,7 +1397,7 @@ test('supplying a legitimate agent result leaves the fileset and ownership resul
     await commitManifest(root, [
       { name: 'fileset', kind: 'fileset' },
       { name: 'ownership', kind: 'ownership' },
-      { name: 'review', kind: 'agent' },
+      { name: 'review', kind: 'agent', scope: 'phase' },
     ])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
 

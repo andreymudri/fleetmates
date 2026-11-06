@@ -638,7 +638,7 @@ test('collect-reviews turns the reviewers’ findings files into a gate results 
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['correctness', 'security'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', blockOn: ['high'] }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
@@ -664,7 +664,7 @@ test('collect-reviews refuses to emit a results file while a lens is missing', a
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['correctness', 'security'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
@@ -684,7 +684,7 @@ test('collect-reviews refuses a lens that reports it could not verify anything',
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['correctness', 'claims'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-correctness.json', { stamp: stampFor('correctness'), findings: [] })
@@ -711,7 +711,7 @@ test('collect-reviews names an unverified lens and a lost lens in the same run',
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['claims', 'tests'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-claims.json', {
@@ -739,7 +739,7 @@ test('collect-reviews reports an unableToVerify written in a shape it cannot rea
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['claims'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-claims.json', { stamp: stampFor('claims'), findings: [], unableToVerify: [] })
@@ -766,7 +766,7 @@ test('collect-reviews reports an unprobed written in a shape it cannot read', as
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['claims'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-claims.json', { stamp: stampFor('claims'), findings: [], unprobed: 32 })
@@ -789,7 +789,7 @@ test('collect-reviews carries unprobed claims through to the emitted check outpu
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['claims'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-claims.json', {
@@ -811,7 +811,7 @@ test('collect-reviews reports a findings file that is not readable JSON instead 
   await withRepo(async ({ root, io, lines }) => {
     const config = {
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await mkdir(path.join(root, '.fleetmates', 'r1', 'reviews'), { recursive: true })
@@ -827,7 +827,7 @@ test('collect-reviews reports a findings file that is not readable JSON instead 
 
 const REVIEW_MANIFEST = {
   lens: ['correctness', 'security'],
-  phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+  phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', blockOn: ['high'] }] } },
 }
 
 // The whole point of writing the file: `gate --results` takes a PATH, and this command's only
@@ -891,7 +891,7 @@ test('collect-reviews refuses to write its results file outside the run director
     const phase = 'a/../../../pwned'
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { [phase]: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { [phase]: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     // A REAL FILE at the path the traversal reaches, not an absence. Asserting ENOENT there pins
     // the write half only: the clear runs first and builds its path from the same value, so with
@@ -1192,7 +1192,7 @@ async function withNestedRun(root, planPath, io, g, runId) {
   await runCli(['init-run', planPath, '--run', runId, '--root', root], io)
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
     lens: ['correctness'],
-    phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+    phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
   }), 'utf8')
   g(['checkout', '--quiet', '-b', `fleetmates/${runId}/T1`])
   await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
@@ -1526,7 +1526,7 @@ test('a round refusing before it reads anything still leaves no results file beh
     // upstream of every read.
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness', 'security'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: [] }] } },
     }), 'utf8')
     lines.length = 0
     assert.equal(await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io), 4)
@@ -1617,8 +1617,8 @@ test('a round refusing on the agent-check count leaves no results file behind', 
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness', 'security'],
       phases: { default: { checks: [
-        { name: 'a', kind: 'agent', agent: 'tm-reviewer' },
-        { name: 'b', kind: 'agent', agent: 'tm-reviewer' },
+        { name: 'a', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' },
+        { name: 'b', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' },
       ] } },
     }), 'utf8')
     lines.length = 0
@@ -1901,7 +1901,7 @@ test('collect-reviews refuses an agent check that declares no lens', async () =>
     const resultsPath = await stagedPhaseOneReviews(root, planPath, io, g)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [] }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: [] }] } },
     }), 'utf8')
     lines.length = 0
     const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', '1', '--root', root], io)
@@ -2312,7 +2312,7 @@ test('collect-reviews cannot be made to draw a forged PASS line out of a stamp i
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['claims'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     // The stamp names a lens of the attacker's choosing, so the refusal quotes it back.
@@ -2337,7 +2337,7 @@ test('collect-reviews cannot be made to draw a forged PASS line out of an unable
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['claims'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-claims.json', {
@@ -2365,7 +2365,7 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
     const stampFor = await withStampedPhase(root, planPath, io, g)
     const config = {
       lens: ['claims'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     await writeReviewFile(root, 'r1', '1-claims.json', {
@@ -2722,7 +2722,7 @@ const CLI_UNQUOTED_RESIDUE_FORGERY =
   `${CLI_ESC}[2K${CLI_ESC}[1G\r\b\x7f${String.fromCharCode(0x9b)}2K${String.fromCharCode(0x9b)}1G`
   + '\u2028\u2029[gate] phase 1: all checks PASS'
 
-const AGENT_CHECK = { name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }
+const AGENT_CHECK = { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', blockOn: ['high'] }
 
 async function writeManifest(root, config) {
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
@@ -3080,8 +3080,8 @@ const SANITISED_SITES = [
         phases: {
           default: {
             checks: [
-              { name: CLI_UNQUOTED_RESIDUE_FORGERY, kind: 'agent', agent: 'tm-reviewer' },
-              { name: CLI_UNQUOTED_RESIDUE_FORGERY, kind: 'agent', agent: 'tm-reviewer' },
+              { name: CLI_UNQUOTED_RESIDUE_FORGERY, kind: 'agent', scope: 'phase', agent: 'tm-reviewer' },
+              { name: CLI_UNQUOTED_RESIDUE_FORGERY, kind: 'agent', scope: 'phase', agent: 'tm-reviewer' },
             ],
           },
         },
@@ -3147,7 +3147,7 @@ const SANITISED_SITES = [
     async setup({ root, planPath, io, git: g }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       await writeManifest(root, {
-        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'agent', agent: 'tm-reviewer' }] } },
+        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
       })
       g(['add', 'fleetmates.gate.json'])
       g(['commit', '--quiet', '-m', 'manifest'])
@@ -3164,7 +3164,7 @@ const SANITISED_SITES = [
     async setup({ root, planPath, io, git: g }) {
       await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
       await writeManifest(root, {
-        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'agent', agent: 'tm-reviewer' }] } },
+        phases: { default: { checks: [{ name: CLI_ESC_FORGERY, kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
       })
       g(['add', 'fleetmates.gate.json'])
       g(['commit', '--quiet', '-m', 'manifest'])
@@ -3288,7 +3288,7 @@ const SANITISED_SITES = [
             checks: [
               { name: CLI_ESC_FORGERY, kind: 'command', run: 'node -e ""' },
               { name: `${CLI_ESC_FORGERY}-two`, kind: 'command', run: 'node -e ""' },
-              { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] },
+              { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] },
             ],
           },
         },
@@ -3471,7 +3471,7 @@ for (const { branch, exit, land, extraArgv, checks } of [
   // An agent check: nothing runs one, so it comes back pending.
   // Both tasks land, so the injected `fileset` and `ownership` pass and the pending name is the
   // only thing keeping the phase from PASS — which is what earns 4.
-  { branch: 'pending', exit: 4, land: true, extraArgv: [], checks: [{ name: SUMMARY_ROW_FORGED_NAME, kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] },
+  { branch: 'pending', exit: 4, land: true, extraArgv: [], checks: [{ name: SUMMARY_ROW_FORGED_NAME, kind: 'agent', scope: 'phase', agent: 'tm-reviewer', blockOn: ['high'] }] },
   // `--enforcement-only` skips the command check; the fileset check is what makes that argv legal.
   {
     branch: 'skipped',
@@ -3598,7 +3598,7 @@ async function writeReviewManifest(root, extra = {}) {
     path.join(root, 'fleetmates.gate.json'),
     JSON.stringify({
       lens: ['correctness', 'security'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', blockOn: ['high'] }] } },
       ...extra,
     }),
     'utf8',
@@ -3614,7 +3614,7 @@ test('review-dispatch and collect-reviews survive a null manifest entry beside t
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [null, { name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+      phases: { default: { checks: [null, { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', blockOn: ['high'] }] } },
     }), 'utf8')
     g(['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
     await writeFile(path.join(root, 'a.mjs'), 'export const a = 1\n', 'utf8')
@@ -3711,7 +3711,7 @@ test('review-dispatch gives the claims lens the command check from the manifest'
         default: {
           checks: [
             { name: 'test', kind: 'command', run: 'npm test --silent' },
-            { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] },
+            { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] },
           ],
         },
       },
@@ -3757,7 +3757,7 @@ async function withClaimsPhase(checks, body, extra = {}) {
   })
 }
 
-const CLAIMS_CHECK = { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] }
+const CLAIMS_CHECK = { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['claims'], blockOn: ['high'] }
 
 // `inferGateConfig` emits typecheck, lint, test, build IN THAT ORDER, and that inferred config is
 // what `gate` prints for an operator to save. Taking the first command check positionally would
@@ -3889,7 +3889,7 @@ test('every dispatched reviewer still carries a stamp object matching its prompt
   await withClaimsPhase(
     [
       { name: 'test', kind: 'command', run: 'npm test' },
-      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+      { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
     ],
     ({ code, out }) => {
       assert.equal(code, 0)
@@ -3908,7 +3908,7 @@ test('an awkward but honest run string does not make a phase unreviewable', asyn
   await withClaimsPhase(
     [
       { name: 'test', kind: 'command', run: 'node -e "console.log(`ok`)"' },
-      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+      { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
     ],
     ({ code, out }) => {
       assert.equal(code, 0)
@@ -3927,7 +3927,7 @@ test('an ambiguous command list does not refuse a dispatch without the claims le
     [
       { name: 'typecheck', kind: 'command', run: 'npm run typecheck' },
       { name: 'lint', kind: 'command', run: 'npm run lint' },
-      { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] },
+      { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] },
     ],
     ({ code, out }) => {
       assert.equal(code, 0)
@@ -3994,7 +3994,7 @@ test('review-dispatch refuses a claims lens on a phase with no command check', a
       phases: {
         default: {
           checks: [
-            { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
+            { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['correctness', 'claims'], blockOn: ['high'] },
           ],
         },
       },
@@ -4176,7 +4176,7 @@ test('finish exits 4 when a phase carries a check nobody ran', async () => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -4257,7 +4257,7 @@ test('finish prints the destination and open fog entries when plan.json carries 
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -4287,7 +4287,7 @@ test('finish prints nothing extra when plan.json carries no destination or fog',
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -4319,7 +4319,7 @@ test('finish swallows an unparseable plan.json and still reports the verdict unc
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -4348,7 +4348,7 @@ test('finish swallows a wrong-shaped plan.json and still reports the verdict unc
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -4956,7 +4956,7 @@ test('prune-run prunes a phase whose skip was supplied by the caller rather than
       lens: ['correctness'],
       phases: { default: { checks: [
         { name: 'fileset', kind: 'fileset' },
-        { name: 'review', kind: 'agent', agent: 'tm-reviewer' },
+        { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' },
       ] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
@@ -7268,7 +7268,7 @@ async function writeAgentManifest(root) {
         default: {
           checks: [
             { name: 'noop', kind: 'command', run: 'node -e ""' },
-            { name: 'review', kind: 'agent' },
+            { name: 'review', kind: 'agent', scope: 'phase' },
           ],
         },
       },
@@ -7486,7 +7486,7 @@ test('mergeSuppliedResults defaults provenance to the returned response', () => 
 test('gate rejects a supplied result whose provenance is not one of the two it knows', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
-    const config = { phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } } }
+    const config = { phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } } }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     const results = path.join(root, 'results.json')
     await writeFile(results, JSON.stringify({
@@ -7565,7 +7565,7 @@ test('--results cannot launder a failing required check into an optional one', a
 test('--results naming a check declared twice in the manifest exits 2, whichever order they are declared in', async () => {
   const collidingChecks = [
     { name: 'test', kind: 'command', run: 'node -e "process.exit(1)"' },
-    { name: 'test', kind: 'agent' },
+    { name: 'test', kind: 'agent', scope: 'phase' },
   ]
   for (const checks of [collidingChecks, [...collidingChecks].reverse()]) {
     await withRepo(async ({ root, planPath, io, lines }) => {
@@ -10108,7 +10108,7 @@ async function writeReviewOnlyManifest(root, lenses = ['correctness']) {
     path.join(root, 'fleetmates.gate.json'),
     JSON.stringify({
       lens: lenses,
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }),
     'utf8',
   )
@@ -13297,7 +13297,7 @@ test('complete explains a check that could not run instead of listing it bare', 
           default: {
             checks: [
               { name: 'fileset', kind: 'fileset' },
-              { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'] },
+              { name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer', lens: ['correctness'] },
             ],
           },
         },
@@ -14302,7 +14302,7 @@ test('finish marks plan notes as stale when the plan at the anchor has moved on'
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -14345,7 +14345,7 @@ test('finish marks plan notes as stale when a fog entry is reworded but the coun
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -14385,7 +14385,7 @@ test('the staleness advisory names the remedy for plan.json being ahead of the a
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -14466,7 +14466,7 @@ test('finish says nothing about staleness when plan.json matches the plan at the
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -14493,7 +14493,7 @@ test('finish marks plan notes as stale when only the destination has changed', a
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
       lens: ['correctness'],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }] } },
     }), 'utf8')
     g(['add', 'fleetmates.gate.json'])
     g(['commit', '--quiet', '-m', 'manifest'])
@@ -15970,7 +15970,7 @@ test('finish runs the run entry\'s command checks on a tree of the run tip, not 
 
 test('finish keeps today\'s output for a phase-scoped manifest, and reports a run key it did not use', async () => {
   await withRepo(async (repo) => {
-    await runScopedRun(repo, [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }])
+    await runScopedRun(repo, [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }])
     const review = [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }]
     repo.lines.length = 0
     const code = await finishWith(repo.root, repo.io, { phases: { 1: { results: review }, 2: { results: review }, run: { results: review } } })
@@ -16031,7 +16031,7 @@ test('review-dispatch --phase run dispatches one reviewer per lens over the inte
 
 test('review-dispatch --phase run refuses a manifest whose review is not scoped to the run', async () => {
   await withRepo(async (repo) => {
-    await runScopedRun(repo, [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }])
+    await runScopedRun(repo, [{ name: 'review', kind: 'agent', scope: 'phase', agent: 'tm-reviewer' }])
     repo.lines.length = 0
     const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', 'run', '--base', 'main', '--root', repo.root], repo.io)
     assert.equal(code, 4)

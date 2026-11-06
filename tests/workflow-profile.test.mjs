@@ -108,6 +108,13 @@ test('a phase-scoped review keeps the per-phase steps byte-for-byte, in both int
   assert.equal(expandWorkflowProfile(withManifest(scoped('phase'))).profileHash, 'a7aac79342573306a3105b11cf05c6b8f263412f3c2f4004c93e84d168c92578')
   assert.equal(expandWorkflowProfile({ ...withManifest(scoped('phase')), ...hostBounded }).profileHash, 'c36a0089fe004c3c0ca64f1ee0f9370b8695983035999d643672fd47c70c533f')
 })
+test('a review with no scope expands as a run-scoped one: the run review is the default', () => {
+  const unscoped = expandWorkflowProfile({ ...withManifest(scoped()), ...hostBounded })
+  const run = expandWorkflowProfile({ ...withManifest(scoped('run')), ...hostBounded })
+  assert.equal(unscoped.ready, true, unscoped.blocked.join('; '))
+  assert.deepEqual(unscoped.steps.map(s => [s.id, s.argv]), run.steps.map(s => [s.id, s.argv]))
+  assert.deepEqual(unscoped.runContract.checks.map(c => [c.kind, c.name]), [['command', 'test'], ['agent', 'review'], ['fileset-run', 'fileset-run']])
+})
 test('a run-scoped review drops the per-phase review steps and emits review-run and collect-run before acceptance and finish', () => {
   const profile = expandWorkflowProfile({ ...withManifest(scoped('run')), ...hostBounded })
   assert.equal(profile.ready, true, profile.blocked.join('; '))

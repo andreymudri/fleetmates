@@ -292,7 +292,7 @@ async function reviewRepo(t, workflow) {
   assert.equal(await runCli(['init-run', path.join(root, 'plan.md'), '--run', 'r1', '--root', root], io), 0)
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({
     lens: ['correctness'],
-    phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+    phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase', blockOn: ['high'] }] } },
   }), 'utf8')
   if (workflow) await writeWorkflow(root, workflow)
   git(root, ['checkout', '--quiet', '-b', 'fleetmates/r1/T1'])
@@ -326,7 +326,7 @@ test('review-dispatch keeps an explicit empty lens list empty under a Windows CI
   const ctx = await reviewRepo(t, WINDOWS_WORKFLOW)
   await writeFile(path.join(ctx.root, 'fleetmates.gate.json'), JSON.stringify({
     lens: ['correctness'],
-    phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: [], blockOn: ['high'] }] } },
+    phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase', lens: [], blockOn: ['high'] }] } },
   }), 'utf8')
   ctx.lines.length = 0
   await runCli(['review-dispatch', '--run', 'r1', '--phase', '1', '--root', ctx.root], ctx.io)

@@ -118,7 +118,7 @@ async function collectWith({ phase, lens }) {
   try {
     const config = {
       lens: [lens],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase', blockOn: ['high'] }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     const lines = []
