@@ -1194,6 +1194,28 @@ test('a command check\'s report takes exactly one of dir: true and a repo-relati
   }
 })
 
+test('an agent check\'s scope is "phase" or "run", and is refused anywhere else', () => {
+  const phases = (check) => ({ default: { checks: [{ name: 'test', kind: 'command', run: 'x' }, check] } })
+  for (const scope of ['phase', 'run']) {
+    assert.doesNotThrow(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'review', kind: 'agent', scope })), scope)
+  }
+  assert.doesNotThrow(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'review', kind: 'agent' })))
+  for (const scope of [null, '', 'RUN', 'all', 1, true, ['run'], {}]) {
+    assert.throws(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'review', kind: 'agent', scope })),
+      (err) => err instanceof ConfigError && err.message.startsWith('phases.default.checks[1].scope must be "phase" or "run"'), JSON.stringify(scope))
+  }
+  // A scope on a check that is not a review would be ignored, and an ignored key reads as obeyed.
+  for (const kind of ['command', 'fileset', 'mcp']) {
+    assert.throws(() => ENFORCEMENT_VALIDATORS.phases(phases({ name: 'x', kind, run: 'y', scope: 'run' })),
+      (err) => err instanceof ConfigError && err.message.startsWith('phases.default.checks[1].scope applies to agent checks only'), kind)
+  }
+})
+
+test('scope rides on phases, so the local layer cannot set it', () => {
+  assert.throws(() => validateLocal({ phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'run' }] } } }), ConfigError)
+  assert.doesNotThrow(() => validateGate({ phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'run' }] } } }))
+})
+
 // The watchdog's knobs live in a `watch` block. Both layers may carry it: nothing in it changes a
 // verdict, so it is not an enforcement key.
 test('validateLocal accepts a well-formed watch block', () => {

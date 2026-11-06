@@ -5851,6 +5851,9 @@ const BROKEN_MANIFESTS = [
   {
     body: JSON.stringify({ lens: 'correctness', phases: { default: { checks: [] } } }),
     message: /^lens must be a non-empty array of strings$/m,
+  },  {
+    body: JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'everywhere' }] } } }),
+    message: /^phases\.default\.checks\[0\]\.scope must be "phase" or "run"/m,
   },
 ]
 

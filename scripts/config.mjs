@@ -1,7 +1,7 @@
 import { NAMES } from './names.mjs'
 import { readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { defaultMaxParallel } from './gate-config.mjs'
+import { defaultMaxParallel, REVIEW_SCOPES } from './gate-config.mjs'
 import { TIERS } from './routing.mjs'
 
 export const GATE_FILE = NAMES.gateFile
@@ -118,6 +118,17 @@ export function reportPathParts(value) {
   return parts
 }
 
+// Where a review runs (`reviewScope` in scripts/gate-config.mjs). Refused rather than defaulted: a
+// misspelt `scope` would otherwise move a review between the phase gates and the run gate without a
+// word. Only an `agent` check takes one; on any other kind it would be ignored, and an ignored key
+// reads to the operator as obeyed.
+function validateScope(check, where) {
+  if (check.kind !== 'agent') throw new ConfigError(`${where} applies to agent checks only, got it on kind ${JSON.stringify(check.kind)}`)
+  if (!REVIEW_SCOPES.includes(check.scope)) {
+    throw new ConfigError(`${where} must be "phase" or "run", got ${JSON.stringify(check.scope)}`)
+  }
+}
+
 export const ENFORCEMENT_VALIDATORS = {
   lens: (v) => {
     if (!Array.isArray(v) || v.length === 0 || v.some((l) => typeof l !== 'string' || l === '')) {
@@ -143,6 +154,9 @@ export const ENFORCEMENT_VALIDATORS = {
       for (const [i, check] of (phase.checks ?? []).entries()) {
         if (check !== null && typeof check === 'object' && check.report !== undefined) {
           validateReport(check.report, `phases.${name}.checks[${i}].report`)
+        }
+        if (check !== null && typeof check === 'object' && check.scope !== undefined) {
+          validateScope(check, `phases.${name}.checks[${i}].scope`)
         }
       }
     }
