@@ -849,11 +849,11 @@ async function collectReport({ target, parts }, cwd) {
 }
 
 // `optional: true` is meaningful on a `command` check — "this lint is advisory". On an
-// enforcement check (`fileset`, `ownership`, `merge`) it would mean "detect the violation and
-// ship anyway", which is never coherent to want. All three are forced non-optional here, at
+// enforcement check (`fileset`, `ownership`, `merge`, `fileset-run`) it would mean "detect the
+// violation and ship anyway", which is never coherent to want. All four are forced non-optional here, at
 // the point the result is built, so an uncommitted manifest cannot disable enforcement while
 // appearing to record it.
-const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
+const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge', 'fileset-run'])
 
 // A CHECK KIND MUST BE A STRING BEFORE ANYTHING IS DECIDED FROM IT.
 //
@@ -1711,6 +1711,43 @@ export async function runFilesetCheck(check, ctx = {}) {
   return { ...result, branchShas }
 }
 
+// The run entry's computed check (`checksForRun` in scripts/gate-config.mjs injects it). `fileset`
+// answers per task branch for the phase in progress; this answers once for the whole run, over the
+// integrated diff `merge-base(base, runTip)..runTip`, which is what the run review reads. It sees
+// what no phase's `fileset` diffs: a commit made on the run branch itself, and a fix branch that
+// is no plan task's. Every changed path must be declared by SOME task of the plan at the anchor,
+// and a protected one must be marked `(protected)` by a task that declares it.
+//
+// Computed from git and the anchored plan only (`ctx.tasks` is that plan, parsed by
+// `deriveContext`): nothing here reads `.fleetmates/`. Like `fileset` it compares the NET diff, so a
+// path added and removed again inside the run reads as unchanged. The marking is not case-folded,
+// for the reason `protectedViolations` gives.
+export async function runFilesetRunCheck(check, ctx = {}) {
+  const { git, runSha, anchorSha, phaseError } = ctx
+  if (!git) return checkResult(check, 'fail', 'fileset-run check has no git access')
+  if (phaseError) return checkResult(check, 'fail', phaseError)
+  const tasks = ctx.tasks ?? []
+  if (tasks.length === 0) return checkResult(check, 'fail', 'the plan at the anchor declares no tasks')
+  let changed
+  const problems = []
+  try {
+    changed = (await git.changedFiles({ base: anchorSha, branch: runSha })).map(normalizePath)
+    for (const hit of await lintCommittedInstructions(git, runSha, changed)) {
+      problems.push(`instruction security lint — ${JSON.stringify(hit.path)}:${hit.line}: ${hit.rule}`)
+    }
+  } catch (err) {
+    if (!(err instanceof GitError)) throw err
+    return checkResult(check, 'fail', `could not diff the run against its anchor: ${err.message}`)
+  }
+  const undeclared = filesetViolations(changed, tasks.flatMap((task) => task.files ?? []))
+  if (undeclared.length > 0) problems.push(`outside every task's declared set — ${undeclared.join(', ')}`)
+  const unmarked = protectedViolations(changed, check, { protectedFiles: tasks.flatMap((task) => task.protectedFiles ?? []) })
+  if (unmarked.length > 0) {
+    problems.push(`protected — ${unmarked.join(', ')} (mark it "Modify (protected)" in the plan, amended on the base branch, or revert it)`)
+  }
+  return problems.length === 0 ? checkResult(check, 'pass', '') : checkResult(check, 'fail', problems.join('\n'))
+}
+
 // git show <sha>:<path> fails when the path does not exist at that commit — a real absence,
 // not a git failure. `null` is a sentinel distinct from any real file content; every caller
 // compares it against another call of this same function, so the sentinel only ever meets
@@ -2088,6 +2125,7 @@ const RUNNERS = Object.assign(Object.create(null), {
   tdd: runTestChangePolicy,
   fileset: runFilesetCheck,
   ownership: runOwnershipCheck,
+  'fileset-run': runFilesetRunCheck,
 })
 
 const MERGE_CHECK = { name: 'merge', kind: 'merge' }
