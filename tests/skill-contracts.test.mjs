@@ -1605,6 +1605,7 @@ const SUBAGENT_STOP_CORPUS = [
   "fleet-supervision :: But SubagentStop fires only when a teammate actually stops — a stalled or parked teammate never reaches it, so liveness remains the only thing that sees a teammate which never stops at all.",
   "fleet-supervision :: No stop-path hook fires for a parked agent.",
   "fleet-supervision :: The SubagentStop backstop",
+  "parallel-execution :: Batching has three limits: wall time grows, because a batch's tasks run one after another; the SubagentStop hook checks a stop against the batch's latest located task only; and a teammate that dies mid-batch leaves its later tasks orphaned.",
   "parallel-execution/reference/init-and-dispatch.md :: What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.",
   "parallel-execution/reference/init-and-dispatch.md :: The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.",
   "parallel-execution/reference/init-and-dispatch.md :: Only a task-scoped failure refuses the stop, meaning fileset or merge, so a refused stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported and the stop is allowed.",
@@ -1613,6 +1614,7 @@ const SUBAGENT_STOP_CORPUS = [
   "parallel-execution/reference/init-and-dispatch.md :: The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.",
   "parallel-execution/reference/init-and-dispatch.md :: It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
   "tm-implementer.md :: Stopping without running that gate is caught, not waved through: a SubagentStop hook runs the enforcement checks at stop time and can refuse the stop.",
+  "tm-implementer.md :: The SubagentStop hook finds you through the location record of this worktree, which names the latest task you ran locate for, so a stop is checked against that task only.",
 ]
 
 test('every sentence about the SubagentStop mechanism, in any document, is one a human locked', async () => {
@@ -2345,4 +2347,23 @@ test('the cores restate the per-run rules of their references', async () => {
   assertStatement(after, /^Append every result to status\.json; a teammate that returned nothing is orphaned, not done\.$/, 'orphaned, not done')
   assertStatement(after, /^Only on PASS, detach the main worktree \(next section\) and dispatch tm-integrator to merge the teammate branches in dependency order with --no-ff\.$/, 'integrate only on PASS')
   assertStatement(after, /^It removes only worktrees whose phase recomputes to PASS, and the removal cannot be undone\.$/, 'prune-run scope and irreversibility')
+})
+
+// Batched implementers (docs/specs/2026-11-06-cost-cuts-design.md, section 5). The core states
+// how a phase is batched, what stays per task, and the three limits, as one locked paragraph: a
+// sentence added to it, of any wording, changes the inventory and fails.
+const BATCHES_CORE = [
+  "workflow groups a phase's tasks by tier, in plan order, into batches of at most batchSize (default 3; config set batchSize 1 restores one teammate per task), and the summary line of workflow --out names them.",
+  'A batch is one tm-implementer doing its tasks in sequence in one worktree, each on its own branch from the base, so the gate checks are unchanged.',
+  'The maxParallel bound counts batches.',
+  'A phase left with one batch takes the direct-Agent path, as one Agent briefed by brief with one --task per task, in batch order.',
+  "Batching has three limits: wall time grows, because a batch's tasks run one after another; the SubagentStop hook checks a stop against the batch's latest located task only; and a teammate that dies mid-batch leaves its later tasks orphaned.",
+]
+
+test('parallel-execution states how a phase is batched and the three limits of batching', async () => {
+  const { doc, files } = await readSkill('parallel-execution')
+  const section = doc.section(/^Batches$/)
+  assert.deepEqual(section.statements.map((st) => st.text), BATCHES_CORE)
+  assert.deepEqual(section.blocks.filter((b) => b.kind !== 'paragraph').map((b) => b.kind), [], 'the Batches section is one paragraph')
+  assert.ok(files[0].text.includes('## Batches\n'), 'the Batches section lives in the core, which every run reads')
 })
