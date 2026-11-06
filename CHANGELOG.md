@@ -49,6 +49,17 @@ reviewers about 17%. The changes below cut those two shares.
 - A plan check before execution in `parallel-execution`, `executing-plans` and `writing-plans`:
   the Out of Scope section excludes nothing the task statement requires, and every dependency
   exists. It is prose guidance, not enforced.
+- Batched implementers. The ergonomics key `batchSize` (default 3, settable in
+  `fleetmates.local.json`; `1` restores one teammate per task) groups a phase's tasks by tier, in
+  plan order, into batches. The generated Workflow dispatches one `tm-implementer` per batch with
+  the batch's model and a schema of one result per task, then flattens the answers to the per-task
+  result shape, reporting every task without one `orphaned`; `workflow --out` names the batches.
+  `brief --task A --task B` composes one batch brief: each task still checks out its own branch
+  from the base, runs `locate`, commits and runs `complete` before the next. With `batchSize` 1 the
+  generated script is unchanged byte for byte. The headless `dispatch` driver stays one task per
+  teammate. Limits: a batch's tasks run in sequence, so a phase takes longer; the `SubagentStop`
+  hook checks a stop against the batch's latest located task only; a teammate that dies mid-batch
+  leaves its later tasks `orphaned`.
 
 ## v2.8.0
 

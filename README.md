@@ -248,6 +248,7 @@ and nothing else:
 | Key | Domain | Default |
 |---|---|---|
 | `maxParallel` | integer >= 1 | `max(1, min(8, cores - 2))` |
+| `batchSize` | integer >= 1: same-tier tasks one implementer does in sequence, each on its own branch | `3`; `1` is one teammate per task |
 | `caveman` | `false \| "lite" \| "full" \| "ultra"` | `false` |
 | `agents.<role>.tier` | `"cheap" \| "mid" \| "capable"` | unset — see below |
 | `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits the session's |

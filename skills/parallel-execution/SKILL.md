@@ -27,6 +27,18 @@ It writes `.fleetmates/<runId>/plan.json` and `status.json` and prints the phase
 order matters, and what to do when `init-run` records no run branch, is in
 `reference/init-and-dispatch.md`.
 
+## Batches
+
+`workflow` groups a phase's tasks by tier, in plan order, into batches of at most `batchSize`
+(default 3; `config set batchSize 1` restores one teammate per task), and the summary line of
+`workflow --out` names them. A batch is one `tm-implementer` doing its tasks in sequence in one
+worktree, each on its own branch from the base, so the gate checks are unchanged. The
+`maxParallel` bound counts batches. A phase left with one batch takes the direct-`Agent` path, as one `Agent` briefed
+by `brief` with one `--task` per task, in batch order. Batching has three limits: wall time grows,
+because a batch's tasks run one after another; the SubagentStop hook checks a stop against the
+batch's latest located task only; and a teammate that dies mid-batch leaves its later tasks
+`orphaned`.
+
 ## Dispatch a phase
 
 Phases with three or more tasks go through the Workflow tool, which needs the user's opt-in: ask
@@ -42,7 +54,7 @@ whole script, and reading the file back loads it all the same.
 
 If the user declines, or the Workflow tool is unavailable, do not stop: use the direct-`Agent`
 path for the whole phase and say which path you took. That path also takes every phase with fewer
-than three tasks. Each task, or each batch (below), is its own background `Agent` with
+than three tasks. Each task, or each batch (above), is its own background `Agent` with
 `isolation: 'worktree'` and the `tm-implementer` persona, at most `maxParallel` at a time, briefed
 with what the CLI prints:
 
@@ -56,18 +68,6 @@ Set the model on every dispatch, from the task's `tier` in `plan.json`:
 
 Role dispatches do not read the plan: `tm-integrator` runs at `cheap` and `tm-reviewer` at
 `capable` unless configured otherwise. Wait on completion notifications; do not poll in a loop.
-
-## Batches
-
-`workflow` groups a phase's tasks by tier, in plan order, into batches of at most `batchSize`
-(default 3; `config set batchSize 1` restores one teammate per task), and the summary line of
-`workflow --out` names them. A batch is one `tm-implementer` doing its tasks in sequence in one
-worktree, each on its own branch from the base, so the gate checks are unchanged. The
-`maxParallel` bound counts batches. A phase left with one batch takes the direct-`Agent` path, as one `Agent` briefed
-by `brief` with one `--task` per task, in batch order. Batching has three limits: wall time grows,
-because a batch's tasks run one after another; the SubagentStop hook checks a stop against the
-batch's latest located task only; and a teammate that dies mid-batch leaves its later tasks
-`orphaned`.
 
 ## Watch the phase
 
