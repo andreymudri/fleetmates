@@ -23,7 +23,7 @@ test('the npm package is fleetmates at the plugin manifest version', () => {
 
 test('the package carries the plugin and nothing that only develops it', () => {
   const paths = packed().files.map((f) => f.path)
-  for (const required of ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/session-start', 'hooks/update-check', 'hooks/run-hook.cmd', 'scripts/cli.mjs', 'templates/phase-workflow.js', 'LICENSE', 'NOTICE.md']) {
+  for (const required of ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/session-start', 'hooks/update-check', 'hooks/run-hook.cmd', 'scripts/cli.mjs', 'templates/phase-workflow.js', 'templates/phase-workflow-batched.js', 'LICENSE', 'NOTICE.md']) {
     assert.ok(paths.includes(required), `package is missing ${required}`)
   }
   const skills = readdirSync(new URL('../skills/', import.meta.url), { withFileTypes: true }).filter((e) => e.isDirectory())
