@@ -2198,7 +2198,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 142, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 145, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2398,10 +2398,19 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **161 lines: 142 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **165 lines: 145 in `cli.mjs`, 7 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **1 site in `cli.mjs`**: `ci-local`'s line writer, which passes every
+// The most recent move was **3 sites in `cli.mjs` and 1 in `reviews.mjs`**, the run review
+// (`--phase run`). `review-dispatch`'s `integrated` argument wraps the `--base` branch name and the
+// run branch name it stamps the tip with; `collect-reviews` wraps the same run branch name where it
+// recomputes that stamp, and the git error in its cannot-read-the-run-tip refusal. A branch name is
+// chosen by whoever created the branch, so it is in the agent-written class. `reviewStale`'s
+// run-tip sentence is the `reviews.mjs` one, driven by `tests/reviews.test.mjs` ("a run stale
+// reason cannot carry an escape sequence out of the tips it quotes"); the three `cli.mjs` lines are
+// not row-driven here.
+//
+// The move before that was **1 site in `cli.mjs`**: `ci-local`'s line writer, which passes every
 // line `scripts/ci-local.mjs` prints (workflow paths, job ids, step names and skip reasons out of
 // the user's workflow files) through `printable`. Driven by `tests/ci-local.test.mjs`; not
 // row-driven here.
@@ -2497,9 +2506,9 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 // newer refusals that IS in the class — the manifest-supplied check name in its empty-lens refusal
 // — has a row above rather than a place in this paragraph.
 //
-// Where the census lines outside `cli.mjs` are driven. `reviews.mjs` holds six: the two
-// `reviewFileName` refusals (a lens, and a phase, with a path separator), the three `reviewStale`
-// sentences, and the bounded-note lens list — all six driven by `tests/reviews.test.mjs`, not
+// Where the census lines outside `cli.mjs` are driven. `reviews.mjs` holds seven: the two
+// `reviewFileName` refusals (a lens, and a phase, with a path separator), the four `reviewStale`
+// sentences (the run-tip one included), and the bounded-note lens list — all seven driven by `tests/reviews.test.mjs`, not
 // from here. `digest.mjs` holds six, driven by the digest row above. `finish.mjs` holds six:
 // `renderRunSummary`'s three failed/pending/skipped name lines, driven by the three run-summary
 // newline tests below the table, its run id, driven by the `renderRunSummary` unit test below
@@ -15933,5 +15942,119 @@ test('finish skips the run entry\'s test inventory instead of re-running the sui
     // is not what this test is about.
     await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } } })
     assert.match(repo.lines.join('\n'), /^ {2}run {3}PASS \(review supplied\) {3}skipped: suite:inventory$/m)
+  })
+})
+
+// --- review-dispatch and collect-reviews for the run (cost-cuts spec, section 2) ---------------
+// The run review judges the integrated diff merge-base(base, runBranch)..runBranch once. Its stamp
+// names the run tip, so any later commit on the run branch makes the findings stale.
+
+function runTip(g) {
+  return g(['rev-parse', 'refs/heads/run-branch']).trim()
+}
+
+test('review-dispatch --phase run dispatches one reviewer per lens over the integrated diff', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    const tip = runTip(repo.git)
+    const forkPoint = repo.git(['merge-base', 'main', 'run-branch']).trim()
+    repo.lines.length = 0
+    // The plan has two phases, and an omitted --phase would be refused as ambiguous; `run` is not.
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', 'run', '--base', 'main', '--root', repo.root], repo.io)
+    assert.equal(code, 0, repo.lines.join('\n'))
+    const spec = JSON.parse(repo.lines.join('\n'))
+    assert.equal(spec.phase, 'run')
+    assert.deepEqual(spec.reviewers.map((r) => r.lens), ['correctness'])
+    const [r] = spec.reviewers
+    assert.deepEqual(r.stamp, { phase: 'run', lens: 'correctness', tips: [`run-branch@${tip}`] })
+    assert.match(r.findingsPath, /reviews\/run-correctness\.json$/)
+    assert.ok(r.prompt.includes('merge-base(main, refs/heads/run-branch)..refs/heads/run-branch'), r.prompt)
+    assert.ok(r.prompt.includes(`git diff ${forkPoint}..${tip}`), r.prompt)
+    assert.doesNotMatch(r.prompt, /fleetmates\/r1\/T1/)
+  })
+})
+
+test('review-dispatch --phase run refuses a manifest whose review is not scoped to the run', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo, [{ name: 'review', kind: 'agent', agent: 'tm-reviewer' }])
+    repo.lines.length = 0
+    const code = await runCli(['review-dispatch', '--run', 'r1', '--phase', 'run', '--base', 'main', '--root', repo.root], repo.io)
+    assert.equal(code, 4)
+    assert.match(repo.lines.join('\n'), /^the run declares 0 agent checks; review-dispatch handles exactly one$/m)
+  })
+})
+
+async function writeRunFindings(repo, tip, findings = []) {
+  await writeReviewFile(repo.root, 'r1', 'run-correctness.json', {
+    stamp: { phase: 'run', lens: 'correctness', tips: [`run-branch@${tip}`] },
+    findings,
+  })
+}
+
+test('collect-reviews --phase run writes results-run.json, and finish --results takes that file as is', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    await writeRunFindings(repo, runTip(repo.git))
+    repo.lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', 'run', '--root', repo.root], repo.io)
+    const out = repo.lines.join('\n')
+    assert.equal(code, 0, out)
+    const resultsPath = path.join(repo.root, '.fleetmates', 'r1', 'reviews', 'results-run.json')
+    assert.ok(out.includes(`results written to ${resultsPath} — pass that path to finish --results`), out)
+    const written = JSON.parse(await readFile(resultsPath, 'utf8'))
+    assert.deepEqual(Object.keys(written), ['phases'])
+    assert.deepEqual(Object.keys(written.phases), ['run'])
+    assert.equal(written.phases.run.results[0].name, 'review')
+    assert.equal(written.phases.run.results[0].status, 'pass')
+
+    repo.lines.length = 0
+    const finished = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--root', repo.root, '--results', resultsPath], repo.io)
+    assert.match(repo.lines.join('\n'), /^ {2}run {3}PASS \(review supplied\)$/m)
+    assert.equal(finished, 0, repo.lines.join('\n'))
+  })
+})
+
+test('collect-reviews --phase run refuses findings once the run branch has moved past their tip', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    const judged = runTip(repo.git)
+    await writeRunFindings(repo, judged)
+    repo.git(['commit', '--quiet', '--allow-empty', '-m', 'a later commit on the run branch'])
+    const now = runTip(repo.git)
+    repo.lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', 'run', '--root', repo.root], repo.io)
+    const out = repo.lines.join('\n')
+    assert.equal(code, 4, out)
+    assert.ok(out.includes(`stale findings for lens correctness: the findings judged run-branch@${judged}, but the run is at run-branch@${now}`), out)
+    await assert.rejects(readFile(path.join(repo.root, '.fleetmates', 'r1', 'reviews', 'results-run.json')))
+  })
+})
+
+// The run's findings are only ever matched against the run tip. A phase-shaped file under the run
+// name, stamped with the task branches, describes another diff.
+test('collect-reviews --phase run refuses a findings file stamped with task branches', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    const t1 = repo.git(['rev-parse', 'refs/heads/fleetmates/r1/T1']).trim()
+    await writeReviewFile(repo.root, 'r1', 'run-correctness.json', {
+      stamp: { phase: 'run', lens: 'correctness', branches: [`fleetmates/r1/T1@${t1}`] },
+      findings: [],
+    })
+    repo.lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', 'run', '--root', repo.root], repo.io)
+    assert.equal(code, 4)
+    assert.match(repo.lines.join('\n'), /stale findings for lens correctness/)
+  })
+})
+
+test('collect-reviews --phase run refuses a detached HEAD, which names no run tip', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo)
+    await writeRunFindings(repo, runTip(repo.git))
+    repo.git(['checkout', '--quiet', '--detach'])
+    repo.lines.length = 0
+    const code = await runCli(['collect-reviews', '--run', 'r1', '--phase', 'run', '--root', repo.root], repo.io)
+    assert.equal(code, 4)
+    assert.match(repo.lines.join('\n'), /there is no run tip to match the findings against/)
   })
 })

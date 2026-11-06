@@ -6513,9 +6513,13 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!config) { io.out('no gate manifest — cannot tell which lenses to dispatch'); return 4 }
 
     const phaseName = flags.phase ?? 'default'
-    const agentChecks = checksForPhase(config, phaseName).filter((c) => kindOf(c) === 'agent')
+    // `--phase run` is the run review: its checks are `checksForRun`'s, never a manifest block
+    // named `run` read through `checksForPhase`, and its diff is the run tip's, never a task set.
+    const runReview = phaseName === RUN_PHASE
+    const reviewChecks = runReview ? checksForRun(config) : checksForPhase(config, phaseName)
+    const agentChecks = reviewChecks.filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
-      io.out(`this phase declares ${agentChecks.length} agent checks; review-dispatch handles exactly one`)
+      io.out(`${runReview ? 'the run' : 'this phase'} declares ${agentChecks.length} agent checks; review-dispatch handles exactly one`)
       return 4
     }
     const check = agentChecks[0]
@@ -6538,10 +6542,11 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const git = createGit({ cwd: root })
     // Resolved to shas as well as names: the stamp each reviewer carries back names the tips it
-    // judged, and `collect-reviews` compares that against the tips as they stand then.
-    const branchShas = await resolveBranchShas(git, tasksOfPhase(plan, phaseName), runId)
+    // judged, and `collect-reviews` compares that against the tips as they stand then. The run
+    // review names no task branch: its one tip is the run branch's, resolved from HEAD below.
+    const branchShas = runReview ? {} : await resolveBranchShas(git, tasksOfPhase(plan, phaseName), runId)
     const branches = Object.keys(branchShas)
-    if (branches.length === 0) {
+    if (!runReview && branches.length === 0) {
       // Refused rather than emitted: reviewers dispatched over branches that do not exist grade
       // an empty diff and report no findings, which is indistinguishable from a clean review.
       io.out(`no task branch of phase ${phaseName} exists yet — there is no diff to review`)
@@ -6562,7 +6567,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // choice; it does not make the value trusted. Nothing screens the run string: containment is
     // structural, and `generateReviewDispatch` emits it as a JSON literal in a DATA block that
     // sits below every instruction, so no value of it can become one.
-    const commandChecks = checksForPhase(config, phaseName).filter((c) => kindOf(c) === 'command')
+    const commandChecks = reviewChecks.filter((c) => kindOf(c) === 'command')
     const namedTest = commandChecks.filter((c) => c.name === 'test')
     const commandCheck = namedTest.length === 1
       ? namedTest[0]
@@ -6621,8 +6626,12 @@ export async function runCli(argv, io = { out: console.log }) {
     try {
       const { learningBundles } = await import('./learning-context.mjs')
       const baseBranch = await resolveBaseBranch(git, flags.base)
-      const commit = await git.mergeBase(await git.resolveRef(`refs/heads/${baseBranch}`), await git.resolveRef(head.ref))
-      const contextTask = { id: `phase-${phaseName}`, members: tasksOfPhase(plan, phaseName).map(t => t.id), files: [...new Set(tasksOfPhase(plan, phaseName).flatMap(t => t.files ?? []))] }
+      const tipSha = await git.resolveRef(head.ref)
+      const commit = await git.mergeBase(await git.resolveRef(`refs/heads/${baseBranch}`), tipSha)
+      // The run's review covers every task of the plan, named here directly rather than through
+      // `tasksOfPhase`, whose every-branch reading of a non-integer name is a phase-key fallback.
+      const reviewedTasks = runReview ? (Array.isArray(plan.tasks) ? plan.tasks : []) : tasksOfPhase(plan, phaseName)
+      const contextTask = { id: `phase-${phaseName}`, members: reviewedTasks.map(t => t.id), files: [...new Set(reviewedTasks.flatMap(t => t.files ?? []))] }
       const contextPlanPath = typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : null)
       const contextBundles = await learningBundles({ git, commit, planPath: contextPlanPath && path.isAbsolute(contextPlanPath) ? path.relative(root, contextPlanPath).split(path.sep).join('/') : contextPlanPath, tasks: [contextTask], role: 'reviewer' })
       spec = generateReviewDispatch({
@@ -6669,6 +6678,12 @@ export async function runCli(argv, io = { out: console.log }) {
         testCommandName,
         linkPaths,
         branchShas,
+        // The run review: the diff is merge-base(base, run)..run pinned to these two shas, and the
+        // stamp names the run tip as `<runBranch>@<sha>`, which `collect-reviews --phase run`
+        // recomputes. The name is wrapped for the reason `runBranch` above is, on both sides.
+        integrated: runReview
+          ? { baseBranch: printable(baseBranch), mergeBaseSha: commit, tipSha, tips: [`${printable(head.name)}@${tipSha}`] }
+          : null,
       })
     } catch (err) {
       // `generateReviewDispatch` throws `validateLinkPaths`'s message among others, which quotes
@@ -6895,10 +6910,11 @@ export async function runCli(argv, io = { out: console.log }) {
     // the lens list is what decides whether a review is complete.
     if (!config) { io.out('no gate manifest — cannot tell which lenses were dispatched'); return 4 }
 
-    const checks = checksForPhase(config, phaseName)
+    const runReview = phaseName === RUN_PHASE
+    const checks = runReview ? checksForRun(config) : checksForPhase(config, phaseName)
     const agentChecks = checks.filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
-      io.out(`this phase declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
+      io.out(`${runReview ? 'the run' : 'this phase'} declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
       return 4
     }
     const check = agentChecks[0]
@@ -7013,29 +7029,51 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`no plan for run ${printable(runId)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
       return 4
     }
-    let branchShas
-    try {
-      branchShas = await resolveBranchShas(createGit({ cwd: root }), tasksOfPhase(plan, phaseName), runId)
-    } catch (err) {
-      if (!(err instanceof GitError)) throw err
-      io.out(`cannot read this phase's task branches: ${err.message}`)
-      return 4
+    let expected
+    if (runReview) {
+      // The run review judged the run tip, as `review-dispatch --phase run` resolved it from HEAD:
+      // recomputed here the same way, so any commit on the run branch since then makes the
+      // findings stale. A HEAD that names no branch names no run tip, and is refused.
+      try {
+        const git = createGit({ cwd: root })
+        const head = await git.headBranch()
+        if (!head.ok) {
+          io.out(`${head.reason} — there is no run tip to match the findings against; check out the run branch and re-run`)
+          return 4
+        }
+        const tipSha = await git.resolveRef(head.ref)
+        expected = reviewStamp({ phase: RUN_PHASE, lens: null, tips: [`${printable(head.name)}@${tipSha}`] })
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        io.out(`cannot read the run tip: ${printable(err.message)}`)
+        return 4
+      }
+    } else {
+      let branchShas
+      try {
+        branchShas = await resolveBranchShas(createGit({ cwd: root }), tasksOfPhase(plan, phaseName), runId)
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        io.out(`cannot read this phase's task branches: ${err.message}`)
+        return 4
+      }
+      if (Object.keys(branchShas).length === 0) {
+        // The mirror of `review-dispatch`'s refusal: with no branch there was no diff to review,
+        // so any file claiming to have reviewed one describes something else entirely.
+        io.out(`no task branch of phase ${phaseName} exists — there was no diff to review`)
+        return 4
+      }
+      expected = reviewStamp({ phase: phaseName, lens: null, branchShas })
     }
-    if (Object.keys(branchShas).length === 0) {
-      // The mirror of `review-dispatch`'s refusal: with no branch there was no diff to review,
-      // so any file claiming to have reviewed one describes something else entirely.
-      io.out(`no task branch of phase ${phaseName} exists — there was no diff to review`)
-      return 4
-    }
-    const expected = reviewStamp({ phase: phaseName, lens: null, branchShas })
 
     const collected = collectReviewResults({
       checkName: check.name,
       lenses,
       files,
       blockOn: check.blockOn ?? ['high'],
-      // `lens` is filled in per file by collectReviewResults; phase and branches are the run's.
-      expected: { phase: phaseName, branches: expected.branches },
+      // `lens` is filled in per file by collectReviewResults; phase and branches (or, for the run
+      // review, the run tip under `tips`) are the run's.
+      expected: runReview ? { phase: RUN_PHASE, tips: expected.tips } : { phase: phaseName, branches: expected.branches },
     })
     if (collected.stale.length > 0) {
       // Reported the way `missing` is, and for the same reason: a stale review is a review this
@@ -7093,7 +7131,9 @@ export async function runCli(argv, io = { out: console.log }) {
     // too, and `gate --results` JSON.parses the whole file, so the redirect yields `--results must
     // be a readable JSON file` (measured on this branch). The file written below is the path to
     // pass instead, which is what makes the redirect unnecessary.
-    const document = JSON.stringify({ results: collected.results }, null, 2)
+    // The run review's file is shaped for `finish --results`, which is where the run entry's
+    // results go: `{ "phases": { "run": { "results": [...] } } }`, passable as it stands.
+    const document = JSON.stringify(runReview ? { phases: { [RUN_PHASE]: { results: collected.results } } } : { results: collected.results }, null, 2)
     io.out(document)
 
     // TEMP-THEN-RENAME, matching `writeState` in `scripts/state.mjs`, because a plain `writeFile`
@@ -7149,10 +7189,10 @@ export async function runCli(argv, io = { out: console.log }) {
       // looking for a path that does not exist. Wrapped for the reason `configFailureMessage`'s
       // syscall branch is: a Node fs error quotes the path this CLI built, and nothing that
       // reaches a terminal should carry bytes unfiltered.
-      io.out(`cannot write the results file at ${printable(resultsPath)}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to gate --results`)
+      io.out(`cannot write the results file at ${printable(resultsPath)}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to ${runReview ? 'finish' : 'gate'} --results`)
       return 4
     }
-    io.out(`results written to ${printable(resultsPath)} — pass that path to gate --results`)
+    io.out(`results written to ${printable(resultsPath)} — pass that path to ${runReview ? 'finish' : 'gate'} --results`)
     return 0
   }
 
