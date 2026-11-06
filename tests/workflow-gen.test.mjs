@@ -872,7 +872,18 @@ test('a phase whose batches each hold one task generates the unbatched script', 
   const mixed = tiered.map((t, i) => ({ ...t, tier: ['cheap', 'mid', 'capable', 'cheap'][i] }))
   const one = await generatePhaseWorkflow({ ...goldenInputs, tasks: mixed.slice(0, 3), batchSize: 1 })
   const three = await generatePhaseWorkflow({ ...goldenInputs, tasks: mixed.slice(0, 3), batchSize: 3 })
+  assert.doesNotMatch(three, /const BATCHES =/)
   assert.equal(three, one)
+})
+
+test('a batched phase hands each task its own advisory context bundle', async () => {
+  const bundle = { task: 'T2', role: 'implementer', entries: [] }
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3, contextBundles: { T2: bundle } })
+  const { calls } = await runBatched(src, () => null)
+  const cheap = calls[0].prompt
+  const t2 = cheap.slice(cheap.indexOf('TASK 2 OF 3: T2'), cheap.indexOf('TASK 3 OF 3: T4'))
+  assert.ok(t2.includes('ANCHORED PLAN AND ADVISORY LEARNING CONTEXT'), 'T2 carries its bundle')
+  assert.ok(!calls[1].prompt.includes('ANCHORED PLAN AND ADVISORY LEARNING CONTEXT'), 'T3 has no bundle')
 })
 
 // Runs a batched script with agent() answering from `answer(prompt, options)`.
