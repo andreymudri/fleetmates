@@ -1,12 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
 import { composeBrief } from '../scripts/brief.mjs'
 import { generateReviewDispatch } from '../scripts/review-gen.mjs'
+import { readSkill } from './md-contract.mjs'
 
 const task = { id: 'T1', title: 'Synthetic fix', files: ['src/fix.mjs', 'test/fix.test.mjs'], branch: 'fleetmates/fixture/T1' }
 const review = { runId: 'fixture', phaseName: '1', runBranch: 'run/fixture', branches: [task.branch], lenses: ['correctness'], findingsDir: '.fleetmates/fixture/reviews', scratchRoot: '/tmp', branchShas: { [task.branch]: 'abc' } }
-const read = name => readFile(new URL('../' + name, import.meta.url), 'utf8')
 
 test('both implementer brief styles require current command evidence and action-first handoffs', () => {
   for (const caveman of [false, 'lite']) {
@@ -36,12 +35,12 @@ test('review dispatch checks tracked task scope before lens quality and quotes i
 })
 
 test('shipped supervision and debugging instructions preserve evidence boundaries and gate scope', async () => {
-  const supervision = await read('skills/fleet-supervision/SKILL.md')
+  const supervision = (await readSkill('fleet-supervision')).raw
   assert.match(supervision, /Next: Y\. Step N of M done: X\./)
   assert.match(supervision, /command, worktree, exit status and relevant output/)
   assert.match(supervision, /self-reported evidence is not a gate verdict/)
   assert.match(supervision, /spec-compliance findings before quality findings/)
-  const debugging = await read('skills/systematic-debugging/SKILL.md')
+  const debugging = (await readSkill('systematic-debugging')).raw
   assert.match(debugging, /## Gate failures/)
   assert.match(debugging, /Reproduce.*Isolate.*Hypothesis.*Probe.*Fix.*Re-run/s)
   assert.match(debugging, /same complete command/)

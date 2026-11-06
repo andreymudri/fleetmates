@@ -384,3 +384,53 @@ test('renderRunSummary names the standing skips of the last phase, printable, un
   assert.doesNotMatch(out, /old\.py/)
   assert.doesNotMatch(renderRunSummary('r1', [{ phase: 1, verdict: pass, standing: [] }]), /standing skips/)
 })
+
+// --- the run entry (docs/specs/2026-11-06-cost-cuts-design.md, section 2) ----------------------
+
+const FAIL_PENDING = { verdict: 'FAIL', failed: [], optionalFailed: [], skipped: [], pending: ['review'] }
+const FAIL_FAILED = { verdict: 'FAIL', failed: ['fileset-run'], optionalFailed: [], skipped: [], pending: [] }
+
+test('the reserved key "run" is accepted beside canonical phase numbers, and read back by name', () => {
+  const supplied = { phases: { 1: { results: [{ name: 'a' }] }, run: { results: [{ name: 'review', status: 'pass' }] } } }
+  assert.equal(validateSuppliedPhases(supplied), null)
+  assert.deepEqual(suppliedForPhase(supplied, 'run'), [{ name: 'review', status: 'pass' }])
+  // Only that exact spelling: anything else non-numeric is still refused.
+  for (const key of ['Run', 'run ', 'runs', '']) {
+    assert.match(validateSuppliedPhases({ phases: { [key]: { results: [] } } }) ?? '', /non-numeric|non-canonical/, JSON.stringify(key))
+  }
+  assert.match(validateSuppliedPhases({ phases: { run: {} } }), /phase run must be an object with a results array/)
+})
+
+test('a pending run review makes the run not finished, and the table names the run', () => {
+  const entries = [phase(1), phase(2), phase('run', { verdict: FAIL_PENDING })]
+  const summary = summarizeRun(entries)
+  assert.equal(summary.complete, false)
+  assert.deepEqual(summary.pendingPhases, ['run'])
+  const out = renderRunSummary('r1', entries)
+  assert.match(out, /^ {2}run {3}FAIL {3}pending: review$/m)
+  assert.match(out, /^ {2}the run review is unverified — review the integrated diff and supply it with finish --results under the key "run"; a check nobody ran is not a check that passed$/m)
+  assert.doesNotMatch(out, /phases with an unverified check/)
+})
+
+test('a failing run check is reported apart from the failing phases', () => {
+  const out = renderRunSummary('r1', [phase(1, { verdict: { ...FAIL_FAILED, failed: ['test'] } }), phase('run', { verdict: FAIL_FAILED })])
+  assert.match(out, /^ {2}run {3}FAIL {3}failed: fileset-run$/m)
+  assert.match(out, /^ {2}phases with a failing check: 1 — fix those, do not land$/m)
+  assert.match(out, /^ {2}the run gate fails on the integrated diff — fix it, do not land$/m)
+})
+
+test('a passing run entry says the run gate passed too, and a run with no run entry keeps today\'s line', () => {
+  const out = renderRunSummary('r1', [phase(1), phase('run', { supplied: true })])
+  assert.match(out, /^ {2}run {3}PASS \(review supplied\)$/m)
+  assert.match(out, /^every phase and the run gate pass: the run branch is ready to land$/m)
+  assert.match(renderRunSummary('r1', [phase(1)]), /^every phase passes: the run branch is ready to land$/m)
+})
+
+test('the standing skips come from the last numbered phase, never from the run entry', () => {
+  const pass = { verdict: 'PASS', failed: [], pending: [], skipped: [] }
+  const out = renderRunSummary('r1', [
+    { phase: 1, verdict: pass, standing: [{ unit: 'db.py', id: 'db.py > a' }] },
+    { phase: 'run', verdict: pass, standing: [] },
+  ])
+  assert.match(out, /^standing skips at the last gate: 1 \(units: db\.py\)$/m)
+})

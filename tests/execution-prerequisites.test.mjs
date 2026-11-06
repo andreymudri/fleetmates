@@ -391,7 +391,7 @@ async function withReadOnlyReviewer(fn) {
   return fixture(async ({ root, gitRun, git }) => {
     await writeFile(path.join(root, 'plan.md'), '### Task 1: fixture\n\n**Files:**\n- Create: `fixture.mjs`\n')
     await writeFile(path.join(root, '.gitignore'), '.fleetmates/\ncodex\n')
-    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] }] } } }))
+    await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase', lens: ['correctness'], blockOn: ['high'] }] } } }))
     await writeFile(path.join(root, 'policy.json'), JSON.stringify({ version: 1, roles: { reviewer: { ...policy.roles.implementer, write: false } } }))
     await gitRun(['add', '.'])
     await gitRun(['commit', '-m', 'test: review plan'])

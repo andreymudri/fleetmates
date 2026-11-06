@@ -44,7 +44,9 @@ export async function runWatch({ tick, emit, state, sleep, now, config, onAction
       await sleep(intervalMs)
       continue
     }
-    if (!snapshot.inFlight) { emit({ event: 'exit', reason: 'phase-idle' }); return 0 }
+    // Silent on purpose: only actionable events are printed, and an idle phase needs no answer from
+    // whoever reads the stream. Exit code 0 is the whole of the signal; errors still end on `exit`.
+    if (!snapshot.inFlight) return 0
     const at = now()
     for (const row of snapshot.rows) {
       const decision = nextAction(row, history[row.taskId], config, at)

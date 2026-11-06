@@ -730,3 +730,51 @@ test('a dispatch for the portability lens carries that prompt', () => {
   assert.ok(prompt.endsWith(`\n${build()}`))
   assert.match(prompt, /8\.3 short name/i)
 })
+
+// --- the run review (docs/specs/2026-11-06-cost-cuts-design.md, section 2) ----------------------
+// One review of the integrated diff, merge-base(base, runBranch)..runBranch, instead of one per
+// phase over its task branches. No task branch is handed in: the run tip holds them all.
+const RUN = {
+  ...BASE,
+  phaseName: 'run',
+  runBranch: 'refs/heads/run/r1',
+  branches: [],
+  branchShas: {},
+  integrated: { baseBranch: 'main', mergeBaseSha: 'b'.repeat(40), tipSha: 'c'.repeat(40), tips: [`run/r1@${'c'.repeat(40)}`] },
+}
+
+test('a run dispatch states the integrated diff under review, and names no task branch', () => {
+  const out = generateReviewDispatch(RUN)
+  assert.equal(out.phase, 'run')
+  for (const r of out.reviewers) {
+    assert.match(r.prompt, /integrated diff/)
+    assert.ok(r.prompt.includes('merge-base(main, refs/heads/run/r1)..refs/heads/run/r1'), r.prompt)
+    assert.ok(r.prompt.includes(`git diff ${'b'.repeat(40)}..${'c'.repeat(40)}`), r.prompt)
+    assert.doesNotMatch(r.prompt, /fleetmates\/r1\/T1/)
+    assert.doesNotMatch(r.prompt, /these task branches/)
+    assert.match(r.prompt, /block this run\b/)
+  }
+})
+
+test('a run dispatch stamps the run tip and writes its findings under the run name', () => {
+  const [r] = generateReviewDispatch(RUN).reviewers
+  assert.deepEqual(r.stamp, { phase: 'run', lens: 'correctness', tips: [`run/r1@${'c'.repeat(40)}`] })
+  assert.equal(r.findingsPath, '.fleetmates/r1/reviews/run-correctness.json')
+  assert.ok(r.prompt.includes(JSON.stringify(r.stamp)))
+})
+
+// The claims reviewer builds the tree under review. For a phase that is the run branch with the
+// task branches merged in; for the run it is the run tip itself, with nothing left to merge.
+test('the claims lens of a run builds its worktree at the run tip and merges nothing', () => {
+  const [r] = generateReviewDispatch({ ...RUN, lenses: ['claims'], testCommand: 'npm test' }).reviewers
+  assert.ok(r.prompt.includes(`git worktree add --detach ${r.scratchWorktree} ${'c'.repeat(40)}`), r.prompt)
+  assert.doesNotMatch(r.prompt, /then merge/)
+  assert.match(r.prompt, /green baseline BEFORE mutating/)
+})
+
+// A phase dispatch is untouched by the run mode existing: the snapshots above pin it byte for
+// byte, and this pins that the run's text is not reachable without `integrated`.
+test('without integrated a dispatch still needs task branches, and never says integrated diff', () => {
+  assert.throws(() => generateReviewDispatch({ ...BASE, branches: [] }), /task branch/)
+  assert.doesNotMatch(generateReviewDispatch(BASE).reviewers[0].prompt, /integrated diff/)
+})
