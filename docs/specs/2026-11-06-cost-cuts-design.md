@@ -97,6 +97,17 @@ reviewers judge work against the plan.
   - The round budget is the run entry's `fixRounds`, else `phases.default.fixRounds`, capped at 2.
     After that the decision is `escalate`.
   - A finding that cites only paths no plan task declares escalates at once.
+  - **Ownership of a fix branch.** `ownership` admits `fleetmates/<run>/fix-<n>` branches, computed
+    from git and the anchored plan only:
+    - branches are probed from n = 1 upward, and the first gap stops the probe;
+    - every plan task branch tip must be an ancestor of the fix branch, so the fix was cut after
+      the whole plan was integrated;
+    - the fix merge may change only the union of the plan's declared files, with protected paths
+      only where marked.
+  - **Limit.** A fix branch may touch any path the plan declares, not just the file set `fix`
+    emitted, because that file set is run state and no check may read it. The limit is pinned in
+    `tests/adversarial.test.mjs`. A run-gate command failure produces no verdict document, so only
+    review findings are routable. A `fileset-run` failure escalates.
 - **Migration.** Existing manifests whose agent check has no `scope` move to run-level review.
   This repository's own `fleetmates.gate.json` is updated in the same change, under a
   `(protected)` plan marking.
