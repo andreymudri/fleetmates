@@ -1889,6 +1889,42 @@ async function onFirstParentChain(git, tip, parent) {
 // Why an injected `ownership` may fail on a run nothing ever asked to be explained. It cannot say
 // which cause applies: knowing when this version was installed would need a record under
 // `.fleetmates/`, which is agent-writable and never consulted by an enforcement check.
+// THE RUN FIX BRANCHES. `fix --phase run` routes a blocking finding of the run review to one fix
+// task per round, `fix-<n>` on `fleetmates/<run>/fix-<n>`, cut from the run tip and merged --no-ff by
+// the integrator like a task branch. No plan task declares it, so without this rule its merge is
+// reachable from no task branch and every phase's `ownership` fails on an honest fix round.
+//
+// What admits one, computed from git and the anchored plan only (`.fleetmates/`, where the fix
+// task's own file set lives, is never read):
+//   - the branch is `fleetmates/<run>/fix-<n>` for n = 1, 2, … probed in order until the first that
+//     does not exist (a gap ends the probe, so a later fix branch behind it fails closed). No plan
+//     task can carry that id: the plan grammar builds every task id as `T<digits>`;
+//   - every existing plan task branch tip is an ancestor of it: it was cut after the whole plan
+//     was integrated, so it cannot carry work into a phase still in progress. One cut earlier holds
+//     a task tip short, and its merge stays unexplained;
+//   - what its merge may carry is the union of every plan task's declared files, protected paths
+//     only where some task marks them: the same bound `fileset-run` holds the whole run to. It is
+//     wider than any one task's set, which is the stated price: the file set `fix` emitted is run
+//     state, and so is not something this check may read.
+const RUN_FIX_BRANCH_LIMIT = 64
+
+async function runFixBranches(git, { runId, tasks, taskShas }) {
+  const declared = { files: (tasks ?? []).flatMap((task) => task?.files ?? []), protectedFiles: (tasks ?? []).flatMap((task) => task?.protectedFiles ?? []) }
+  const found = []
+  for (let n = 1; n <= RUN_FIX_BRANCH_LIMIT; n += 1) {
+    const id = `fix-${n}`
+    const branch = resolveTaskBranch({ id }, runId)
+    if (!branch || !(await git.branchExists(branch))) break
+    const sha = await git.resolveRef(`refs/heads/${branch}`)
+    let afterEveryTask = true
+    for (const taskSha of taskShas) {
+      if (!(await git.isAncestor(taskSha, sha))) { afterEveryTask = false; break }
+    }
+    if (afterEveryTask) found.push({ branch, sha, task: { id, ...declared } })
+  }
+  return found
+}
+
 const INJECTED_OWNERSHIP_NOTE = 'check injected: the manifest does not declare it; the commits above may predate this fleetmates version, or come from an inline run (use --no-fleet)'
 
 export async function runOwnershipCheck(check, ctx = {}) {
@@ -1907,6 +1943,12 @@ export async function runOwnershipCheck(check, ctx = {}) {
         shas.push(await git.resolveRef(`refs/heads/${branch}`))
         taskOf.push(task)
       }
+    }
+    // Admitted beside the plan's task branches, under the rule `runFixBranches` states.
+    for (const fix of await runFixBranches(git, { runId, tasks, taskShas: [...shas] })) {
+      branches.push(fix.branch)
+      shas.push(fix.sha)
+      taskOf.push(fix.task)
     }
 
     // Tolerated when it cannot be resolved: a run configured without a base branch, or with
