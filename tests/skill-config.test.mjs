@@ -95,7 +95,7 @@ const SKILL_FIXTURE_URL = new URL('./fixtures/fleetmates-config.SKILL.md', impor
 // the skill — added sentence, added section, reworded aside, trailing space — fails here first.
 // This is the layer that actually closes the prose surface. The rest survive because they turn
 // "the digest changed" into a message that says WHICH kind of change it was.
-const SKILL_SHA256 = '0b2f9a9336f054237a9e8d1cce234f8133a8983d78049ed1f90254274df5381d'
+const SKILL_SHA256 = '00bec501f575d78a6102ec421b1d4eaafd122bd16200972956741e58a718e412'
 
 test('the skill matches the digest recorded in this test file', async () => {
   const text = await readFile(SKILL_URL)
@@ -142,7 +142,7 @@ test('the skill has exactly the sections that were reviewed', async () => {
 // LAYER 3 — every caveman mention outside the pinned section, inventoried. Restored: a round-six
 // fix narrowed this to a line filter and it stopped catching what it had caught.
 const ALLOWED_CAVEMAN_LINES = [
-  /^`config` manages the \*\*ergonomics\*\* keys only: `maxParallel`, `caveman`, and$/,
+  /^`config` manages the \*\*ergonomics\*\* keys only: `maxParallel`, `batchSize`, `caveman`, and$/,
 ]
 
 test('every mention of caveman outside the pinned section is accounted for', async () => {
