@@ -1,5 +1,10 @@
 ## Finish the pending checks
 
+This file describes a review check scoped `phase`: reviewed inside each phase gate, over the phase
+diff, with its results keyed by phase. A review check with no `scope` is scoped `run` and follows
+the core's section "Review the run" instead; the rules below for reviewers, findings files and
+stamps apply to it too.
+
 The CLI runs `command` checks itself and returns `agent` and `mcp` checks as `pending` —
 those you execute:
 

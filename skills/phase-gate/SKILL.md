@@ -54,7 +54,8 @@ server is recorded `skip`, and said out loud.
 
 A review check scoped `run` in `fleetmates.gate.json` belongs to no phase gate. It is judged once,
 after the last phase is integrated, on the run's integrated diff
-`merge-base(base, run branch)..run branch`. With the run branch checked out:
+`merge-base(base, run branch)..run branch`. An `agent` check with no `scope` is scoped `run`,
+and `"scope": "phase"` keeps a review in each phase gate instead. With the run branch checked out:
 
 1. `review-dispatch --phase run`, then the reviewers and the refute pass as above.
 2. `collect-reviews --phase run`, which writes `.fleetmates/<runId>/reviews/results-run.json`,

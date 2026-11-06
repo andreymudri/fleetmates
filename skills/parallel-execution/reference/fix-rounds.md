@@ -1,5 +1,10 @@
 ## Why fresh implementers, and how review fits between tasks
 
+This section describes a review check scoped `phase`, which each phase gate carries. A review check
+with no `scope` is scoped `run`: the phase gates between tasks then run the command checks,
+`fileset` and `ownership` but no review, and the review runs once on the integrated run, as
+phase-gate's section "Review the run" describes.
+
 Each teammate is a **fresh** agent carrying only its own task's context — the brief for
 that task, the interfaces it touches, and the global constraints. It never inherits the
 session's accumulated history or another teammate's context. A dispatch built from pasted

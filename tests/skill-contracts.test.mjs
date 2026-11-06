@@ -2254,6 +2254,11 @@ test('the run review: parallel-execution routes to it, phase-gate states the flo
     claim: /^A review check scoped run in fleetmates\.gate\.json belongs to no phase gate\.$/,
     then: /^It is judged once, after the last phase is integrated, on the run's integrated diff merge-base\(base, run branch\)\.\.run branch\.$/,
   })
+  assertClaim(run, {
+    label: 'run is the default scope',
+    claim: /^It is judged once, after the last phase is integrated, on the run's integrated diff/,
+    then: /^An agent check with no scope is scoped run, and "scope": "phase" keeps a review in each phase gate instead\.$/,
+  })
   const steps = [
     /^review-dispatch --phase run, then the reviewers and the refute pass as above\.$/,
     /^collect-reviews --phase run, which writes \.fleetmates\/<runId>\/reviews\/results-run\.json, already shaped for finish\.$/,
@@ -2292,6 +2297,33 @@ test('the run review: parallel-execution routes to it, phase-gate states the flo
   })
   assertStatement(run, /^The workflow-execute controller stops with run-fix-required on a run retry instead of running the round; continue the route from there as above\.$/, 'the controller gap')
   assertStatement(run, /^A review check scoped phase is not reviewed here: it keeps a review per phase, through the same commands with --phase <n>\.$/, 'phase scope keeps per-phase review')
+})
+
+// Two reference texts were written when every review ran per phase and still say "the phase diff"
+// and "between tasks". Each opens with a note that it describes `scope: "phase"`, so a reader who
+// lands there from the core does not take it for the default. Pinned as the first paragraph of the
+// section, in the reference file, with the pointer adjacent to the scope statement.
+test('the reference texts written for per-phase review open by saying so and point to the run review', async () => {
+  const notes = [
+    {
+      skill: 'phase-gate', section: /^Finish the pending checks$/, file: 'phase-gate/reference/review-results.md',
+      claim: /^This file describes a review check scoped phase: reviewed inside each phase gate, over the phase diff, with its results keyed by phase\.$/,
+      then: /^A review check with no scope is scoped run and follows the core's section "Review the run" instead; the rules below for reviewers, findings files and stamps apply to it too\.$/,
+    },
+    {
+      skill: 'parallel-execution', section: /^Why fresh implementers, and how review fits between tasks$/, file: 'parallel-execution/reference/fix-rounds.md',
+      claim: /^This section describes a review check scoped phase, which each phase gate carries\.$/,
+      then: /^A review check with no scope is scoped run: the phase gates between tasks then run the command checks, fileset and ownership but no review, and the review runs once on the integrated run, as phase-gate's section "Review the run" describes\.$/,
+    },
+  ]
+  for (const note of notes) {
+    const section = (await skill(note.skill)).doc.section(note.section)
+    assert.equal(section.label, `${note.file} § ${section.title}`, `${note.file}: the note's section moved`)
+    const first = section.blocks[0]
+    assert.equal(first?.kind, 'paragraph', `${note.file}: the section must open with the note`)
+    assert.match(statementsOf(first.text)[0] ?? '', note.claim, `${note.file}: the note must come first`)
+    assertClaim(section, { label: `${note.file} scope note`, claim: note.claim, then: note.then })
+  }
 })
 
 // The cores restate, in short, rules their reference files state in full, because every run needs
