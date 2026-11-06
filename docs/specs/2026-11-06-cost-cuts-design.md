@@ -128,6 +128,36 @@ reviewers judge work against the plan.
 - **`workflow --out <file>`** writes the generated script to the file and prints only the path and
   a one-line summary, so the script never enters the orchestrator's context.
 
+### 5. Batched implementers (amendment, 2026-11-06)
+
+Implementers are about 53% of fleet cost, and every fresh teammate pays the base context and its
+own exploration of the repository again. This section was added after the owner chose to batch
+tasks before validation.
+
+- **Batches.** Each phase's tasks are grouped by tier, in plan order, into batches of at most
+  `batchSize` tasks. The default `batchSize` is 3, and 1 restores one teammate per task.
+  - Tasks of different tiers never share a batch, so a batch has exactly one model.
+  - `batchSize` is an ergonomics key, settable in `fleetmates.local.json`, because the gate does
+    not depend on it.
+  - `maxParallel` then bounds batches, not tasks.
+- **One teammate per batch.** A batch is one `tm-implementer` in one worktree, doing its tasks in
+  sequence. Each task still runs `git checkout -B fleetmates/<run>/<task> <base>`, `locate`, its
+  own commits and `complete`. The teammate then moves to the next task, and returns one result per
+  task.
+- **Enforcement is unchanged.** Task branches, `fileset`, `ownership` and the merge preview are
+  exactly as before, because each task still lands on its own branch from the base.
+- **Paths.**
+  - The Workflow path batches in `workflow` generation.
+  - The direct-Agent path composes a batch brief with `brief --task A --task B ...`.
+  - A phase whose batching leaves one batch goes through the direct-Agent path.
+- **Limits.**
+  - Tasks inside a batch run sequentially, so a phase's wall time grows.
+  - The `SubagentStop` hook resolves the teammate through the worktree location record. That
+    record names the batch's latest task, so a stop is checked against that task only. The hook
+    was already best effort, and the phase gate is the enforcement.
+  - A teammate that dies mid-batch leaves the later tasks of its batch undone. They are reported
+    `orphaned`, as an unreturned task is today.
+
 ### 4. A plan check before execution
 
 The `parallel-execution` core, `executing-plans` and the self-review list in `writing-plans` gain
@@ -191,6 +221,8 @@ RESOLVED (owner, 2026-11-06)
 - Watchdog: actionable events only, and not started on the Workflow path.
 - Orchestrator self-inspection: forbidden, except to investigate a FAIL or a conflict.
 - Success criterion: at least 30% cheaper than 2.8.0, with the same fail-to-pass result.
+- Batching (added after the owner asked whether the cut was too small): one teammate per batch
+  with one branch per task, at most 3 tasks per batch, never mixing tiers, on by default.
 
 DEFERRED
 
