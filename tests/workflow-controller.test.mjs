@@ -119,6 +119,13 @@ if (command === 'init-run') {
   rounds[task] = (rounds[task] ?? 0) + 1
   writeFileSync(file, JSON.stringify({ ...status, fixRounds: { ...(status.fixRounds ?? {}), [String(phase)]: rounds } }))
   console.log(task + ' phase ' + phase + ' round ' + rounds[task])
+} else if (command === 'dispatch-reviews' && flag('phase') === 'run') {
+  // As review-dispatch --phase run stamps it: the run tip as <runBranch>@<sha>, read from HEAD.
+  const tip = git(['rev-parse', 'HEAD']), name = git(['symbolic-ref', '--short', 'HEAD'])
+  mkdirSync(path.join(dir, 'reviews'), { recursive: true })
+  writeFileSync(path.join(dir, 'reviews', 'run-correctness.json'), JSON.stringify({ stamp: { phase: 'run', lens: 'correctness',
+    tips: [name + '@' + (mode.includes('stale-run-review') ? '0'.repeat(40) : tip)] }, findings: [] }))
+  console.log('reviews dispatched')
 } else if (command === 'dispatch-reviews') {
   if (mode.includes('reviews-exit-2')) { console.log('unsupported flag spelling'); process.exit(2) }
   const phase = Number(flag('phase'))
@@ -132,6 +139,14 @@ if (command === 'init-run') {
   writeFileSync(path.join(dir, 'reviews', phase + '-correctness.json'), JSON.stringify({ stamp: { phase: String(phase), lens: 'correctness',
     branches: names.map(n => n + '@' + (mode.includes('stale-review') ? '0'.repeat(40) : branchShas[n])) }, findings: [] }))
   console.log('reviews dispatched')
+} else if (command === 'collect-reviews' && flag('phase') === 'run') {
+  // The run's results file is shaped for finish --results, and its success line says so.
+  const file = path.join(dir, 'reviews', 'results-run.json')
+  const findings = mode.includes('run-review-blocks') ? [{ severity: 'high', file: 'a.txt', line: 1, title: 'wrong value', detail: 'fixture' }] : []
+  const document = JSON.stringify({ phases: { run: { results: [{ name: 'review', kind: 'agent', status: findings.length ? 'fail' : 'pass', findings }] } } }, null, 2)
+  console.log(document)
+  writeFileSync(file, document + '\n')
+  console.log('results written to ' + file + ' — pass that path to ' + (mode.includes('run-gate-line') ? 'gate' : 'finish') + ' --results')
 } else if (command === 'collect-reviews') {
   const phase = flag('phase'), file = path.join(dir, 'reviews', 'results-' + phase + '.json')
   const document = JSON.stringify({ results: [{ name: 'review', kind: 'agent', status: mode.includes('review-blocks') ? 'fail' : 'pass', findings: [] }] }, null, 2)
@@ -165,6 +180,16 @@ if (command === 'init-run') {
     process.exit(1)
   }
   console.log('PASS')
+} else if (command === 'fix' && flag('phase') === 'run') {
+  // decideRunFix's output as fix --phase run prints it: one fix-<n> task cut from the run tip.
+  const verdict = JSON.parse(readFileSync(flag('verdict'), 'utf8'))
+  writeFileSync(path.join(bin, 'verdict-seen.json'), JSON.stringify(verdict))
+  const round = mode.includes('run-fix-round-2') ? 2 : 1, taskId = 'fix-' + round
+  const tip = git(['rev-parse', 'HEAD']), name = git(['symbolic-ref', '--short', 'HEAD'])
+  const findings = verdict.results.flatMap(r => r.findings ?? [])
+  console.log(JSON.stringify(mode.includes('run-fix-escalate') ? { decision: 'escalate', tasks: [], reason: 'undeclared-path', check: 'review', file: 'elsewhere.txt', phase: 'run' }
+    : { decision: 'retry', reason: null, phase: 'run', tasks: [{ taskId, branch: 'fleetmates/' + run + '/' + (mode.includes('run-fix-plan-branch') ? 'T1' : taskId), round, tier: 'mid',
+      checks: ['review'], files: ['a.txt'], findings, cutFrom: name + '@' + (mode.includes('run-fix-old-cut') ? '0'.repeat(40) : tip) }] }, null, 2))
 } else if (command === 'fix') {
   const verdict = JSON.parse(readFileSync(flag('verdict'), 'utf8'))
   writeFileSync(path.join(bin, 'verdict-seen.json'), JSON.stringify(verdict))
@@ -181,8 +206,12 @@ if (command === 'init-run') {
     : { decision: 'retry', tasks: named.map(t => ({ taskId: t.id, tier: 'mid', round: mode.includes('fix-round-one') ? 1 : (rounds[t.id] ?? 0) + 1,
       checks: verdict.results.filter(r => r.status === 'fail').map(r => r.name) })), reason: null }, null, 2))
 } else if (command === 'finish') {
+  // As finish computes it: a run-scoped review is pending until the run entry's results carry it,
+  // and a phase-scoped one until each phase's do.
   const supplied = flag('results') ? JSON.parse(readFileSync(flag('results'), 'utf8')) : null
-  const pending = [...new Set(tasks.map(t => t.phase))].filter(phase => !supplied?.phases?.[String(phase)]?.results?.some(r => r.name === 'review' && r.status === 'pass'))
+  const review = JSON.parse(readFileSync(path.join(root, 'fleetmates.gate.json'), 'utf8')).phases.default.checks.find(c => c.kind === 'agent')
+  const entries = review.scope === 'run' ? ['run'] : [...new Set(tasks.map(t => t.phase))]
+  const pending = entries.filter(phase => !supplied?.phases?.[String(phase)]?.results?.some(r => r.name === 'review' && r.status === 'pass'))
   if (pending.length) { console.log('pending: review'); process.exit(4) }
   console.log('finished')
 } else process.exit(2)
@@ -201,7 +230,7 @@ const policy = { version: 1, roles: {
 const retention = { maxArtifactBytes: 1024 * 1024, maxRunBytes: 64 * 1024 * 1024, maxAgeMs: 86400000 }
 const factory = async () => ({ exec: defaultExec, close: async () => {} })
 
-async function project(t, { tasks = [{ id: 'T1', phase: 1, file: 'a.txt' }], rolePolicy = policy, fixRounds = 1, required = [tasks[0].file] } = {}) {
+async function project(t, { tasks = [{ id: 'T1', phase: 1, file: 'a.txt' }], rolePolicy = policy, fixRounds = 1, required = [tasks[0].file], scope = 'phase' } = {}) {
   const base = await realpath(await mkdtemp(path.join(tmpdir(), 'wfc-')))
   t.after(() => rm(base, { recursive: true, force: true }))
   const root = path.join(base, 'repo'), bin = path.join(base, 'bin')
@@ -211,7 +240,7 @@ async function project(t, { tasks = [{ id: 'T1', phase: 1, file: 'a.txt' }], rol
   await writeFile(path.join(root, 'plan.md'), tasks.map(task => `### Task ${task.id.slice(1)}: task ${task.id}\n\n${task.phase > 1 ? `**Depends:** T${task.phase - 1}\n` : ''}**Files:**\n- Create: \`${task.file}\`\n`).join('\n'))
   const check = `${node} -e "process.exit(${JSON.stringify(required).replaceAll('"', "'")}.every(f=>require('fs').existsSync(f))?0:1)"`
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { fixRounds, checks: [
-    { name: 'behavior', kind: 'command', run: check }, { name: 'review', kind: 'agent', lens: ['correctness'], blockOn: ['high'] }] } } }))
+    { name: 'behavior', kind: 'command', run: check }, { name: 'review', kind: 'agent', lens: ['correctness'], blockOn: ['high'], scope }] } } }))
   await writeFile(path.join(root, 'env.json'), JSON.stringify({ version: 1, toolchains: [{ name: 'node', command: process.execPath, argv: ['--version'], expected: 'v' }],
     lockfiles: [], setup: [], baseline: [{ name: 'runtime', run: `${node} -e 0`, timeoutMs: 20000 }], required: [], dependencies: 'clean-checkout' }))
   await writeFile(path.join(root, 'roles.json'), JSON.stringify(rolePolicy))
@@ -662,12 +691,13 @@ test('malformed requests, unsafe entrypoints and unsupported role authority refu
 test('expansion validation accepts only the fixed CLI fragment set bound to the controller inputs', () => {
   const sha = value => createHash('sha256').update(value).digest('hex')
   const markdown = '### Task 1: First\n\n**Files:**\n- Create: `a.txt`\n'
-  const manifestText = JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', lens: ['correctness'] }] } } })
+  const manifestText = JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', lens: ['correctness'], scope: 'phase' }] } } })
+  const manifest = JSON.parse(manifestText)
   const inputs = { commit: 'a'.repeat(40), plan: sha(markdown), manifest: sha(manifestText), context: 'c'.repeat(64), environment: 'e'.repeat(64), verifier: 'f'.repeat(64) }
   const request = { runId: 'r1' }
   const expanded = expandWorkflowProfile({ profile: 'bug-fix', runId: 'r1', planPath: 'plan.md', baseBranch: 'main', harness: 'codex', inputs, markdown, manifestText,
     capabilities: { harness: 'available' }, integration: 'host-bounded', contracts: { environment: 'env.json', rolePolicy: 'roles.json' } })
-  assert.deepEqual(validateWorkflowExpansion(expanded, { inputs, request }), [1])
+  assert.deepEqual(validateWorkflowExpansion(expanded, { inputs, request, manifest }), [1])
   const rehash = value => { const { profileHash, ...rest } = value; return { ...rest, profileHash: sha(JSON.stringify(rest)) } }
   const tamper = change => { const copy = structuredClone(expanded); change(copy); return rehash(copy) }
   const refusals = [
@@ -689,10 +719,10 @@ test('expansion validation accepts only the fixed CLI fragment set bound to the 
     tamper(p => { p.steps.find(s => s.id === 'review-1').argv.push('--execution', '/elsewhere/contract.json') }),
     tamper(p => { p.steps.find(s => s.id === 'gate-1').argv.push('--yes') }),
   ]
-  for (const [index, value] of refusals.entries()) assert.throws(() => validateWorkflowExpansion(value, { inputs, request }), undefined, `refusal ${index}`)
-  assert.throws(() => validateWorkflowExpansion(expanded, { inputs: { ...inputs, plan: 'b'.repeat(64) }, request }), /identity/)
-  assert.throws(() => validateWorkflowExpansion(tamper(p => { p.steps.find(s => s.id === 'finish').argv.splice(-2, 2) }), { inputs, request }), /finish/)
-  assert.throws(() => validateWorkflowExpansion(tamper(p => { p.steps.find(s => s.id === 'gate-1').argv.splice(-1, 1, '.fleetmates/r1/reviews/other.json') }), { inputs, request }), /gate must read/)
+  for (const [index, value] of refusals.entries()) assert.throws(() => validateWorkflowExpansion(value, { inputs, request, manifest }), undefined, `refusal ${index}`)
+  assert.throws(() => validateWorkflowExpansion(expanded, { inputs: { ...inputs, plan: 'b'.repeat(64) }, request, manifest }), /identity/)
+  assert.throws(() => validateWorkflowExpansion(tamper(p => { p.steps.find(s => s.id === 'finish').argv.splice(-2, 2) }), { inputs, request, manifest }), /finish/)
+  assert.throws(() => validateWorkflowExpansion(tamper(p => { p.steps.find(s => s.id === 'gate-1').argv.splice(-1, 1, '.fleetmates/r1/reviews/other.json') }), { inputs, request, manifest }), /gate must read/)
 })
 
 const upTo = { prepare: ['init-run'], baseline: ['init-run', 'preview-check'], implement: ['init-run', 'preview-check', 'dispatch'],
@@ -1162,7 +1192,7 @@ async function enforcementRepo(t, { agent = true } = {}) {
   await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [
     { name: 'noop', kind: 'command', run: `${node} -e ""` }, { name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' },
-    ...(agent ? [{ name: 'review', kind: 'agent', lens: ['correctness'] }] : [])] } } }))
+    ...(agent ? [{ name: 'review', kind: 'agent', lens: ['correctness'], scope: 'phase' }] : [])] } } }))
   git(root, 'add', '.'); git(root, 'commit', '-q', '-m', 'test: anchor')
   git(root, 'checkout', '-q', '-b', 'run-branch')
   const { runCli } = await import('../scripts/cli.mjs')
@@ -1271,7 +1301,7 @@ async function strictDispatch(t, checks) {
 const enforcementChecks = [{ name: 'fileset', kind: 'fileset' }, { name: 'ownership', kind: 'ownership' }]
 
 test('dispatch through the CLI with a mandatory agent check: the strict driver accepts the pending-only answer and the task is done', { skip: process.platform === 'win32' }, async t => {
-  const run = await strictDispatch(t, [...enforcementChecks, { name: 'review', kind: 'agent', lens: ['correctness'] }])
+  const run = await strictDispatch(t, [...enforcementChecks, { name: 'review', kind: 'agent', lens: ['correctness'], scope: 'phase' }])
   assert.equal(run.code, 0, run.output)
   assert.equal(run.state, 'done', run.output)
   assert.match(run.output, /T1: done/)
@@ -1280,7 +1310,7 @@ test('dispatch through the CLI with a mandatory agent check: the strict driver a
 })
 
 test('dispatch through the CLI with a pending check of a kind that is not agent or mcp: the strict driver orphans the task', { skip: process.platform === 'win32' }, async t => {
-  const run = await strictDispatch(t, [...enforcementChecks, { name: 'review', kind: 'agent', lens: ['correctness'] }, { name: 'typo', kind: 'lnit' }])
+  const run = await strictDispatch(t, [...enforcementChecks, { name: 'review', kind: 'agent', lens: ['correctness'], scope: 'phase' }, { name: 'typo', kind: 'lnit' }])
   assert.equal(run.state, 'orphaned', run.output)
   assert.match(run.output, /T1: orphaned/)
   assert.deepEqual(run.verifications.map(([kind, receipt]) => [kind, receipt.code, receipt.pendingOnly, receipt.scope]),
@@ -1299,4 +1329,153 @@ test('the CLI enforcement answer refuses each failure shape on its own and ignor
   assert.deepEqual(answer([agent, { name: 'typo', kind: 'lnit', status: 'pending', optional: true }]), { code: 4, pendingOnly: true, pending: ['agent'] })
   assert.deepEqual(answer([agent, { name: 'typo', kind: 'lnit', status: 'pending' }]), { code: 4, pendingOnly: false, pending: ['agent', 'lnit'] })
   assert.deepEqual(answer([{ name: 'deep', kind: 'mcp', status: 'pending' }]), { code: 4, pendingOnly: true, pending: ['mcp'] })
+})
+
+// ---- run-scoped review (docs/specs/2026-11-06-cost-cuts-design.md, section 2, Workflow path) ----
+
+async function acceptanceFor(fixture, report) {
+  const acceptance = []
+  for (const criterion of report.acceptance.required) {
+    const bytes = Buffer.from(JSON.stringify({ version: 1, criterion, tree: report.acceptance.tree, status: 'pass' }))
+    acceptance.push({ criterion, reference: (await retainExecutionArtifact({ common: fixture.common, runId: 'r1', kind: 'acceptance-evidence', bytes, retention })).reference })
+  }
+  return acceptance
+}
+
+test('a run-scoped review runs once on the integrated run: phase gates read no review, finish gets the run entry and final-review comes from the run review', async t => {
+  const fixture = await project(t, { scope: 'run', tasks: [{ id: 'T1', phase: 1, file: 'a.txt' }, { id: 'T2', phase: 2, file: 'b.txt' }] })
+  const report = await fixture.run()
+  const seen = await fixture.invocations()
+  assert.deepEqual(commands(seen), ['init-run', 'preview-check', 'dispatch', 'gate', 'dispatch', 'gate', 'dispatch-reviews', 'collect-reviews'])
+  for (const gate of seen.filter(e => e.command === 'gate')) assert.ok(!gate.args.includes('--results'), 'a phase gate with no review reads no review results')
+  assert.deepEqual(seen.find(e => e.command === 'dispatch-reviews').args.slice(0, 5), ['dispatch-reviews', '--run', 'r1', '--phase', 'run'])
+  assert.deepEqual(seen.find(e => e.command === 'collect-reviews').args.slice(0, 5), ['collect-reviews', '--run', 'r1', '--phase', 'run'])
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  assert.equal(report.acceptance.tree, git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1^{tree}'))
+
+  const done = await fixture.resume({ acceptance: await acceptanceFor(fixture, report) })
+  assert.deepEqual(commands(await fixture.invocations()).slice(seen.length), ['gate', 'gate', 'collect-reviews', 'finish'],
+    'the run review dispatch is reused; its collection reruns before finish')
+  const suppliedPath = path.join(fixture.root, '.fleetmates/r1/reviews/finish-results.json')
+  assert.deepEqual((await fixture.invocations()).at(-1).args.slice(-4, -2), ['--results', suppliedPath])
+  assert.deepEqual(JSON.parse(await readFile(suppliedPath, 'utf8')), { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } } },
+    'finish receives the run entry under the reserved key run, and no phase entry')
+  const obligations = done.obligations.obligations
+  assert.ok(!obligations.some(o => /^review-\d+$/.test(o.id)), 'no phase carries a review obligation of its own')
+  const finalReview = obligations.find(o => o.id === 'final-review')
+  assert.equal(finalReview.status, 'pass')
+  assert.equal(finalReview.tree, git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1^{tree}'))
+  assert.equal(done.obligations.verifiedComplete, true)
+  assert.equal(done.state, 'unresolved', 'an injected verification fixture is still not completion evidence')
+})
+
+test('run findings must be fresh against the run tip: a stale stamp, a moved tip or a gate-shaped success line stops before finish', async t => {
+  const stale = await project(t, { scope: 'run' })
+  stale.env.mode = 'stale-run-review'
+  const refused = await stale.run()
+  assert.deepEqual(commands(await stale.invocations()), ['init-run', 'preview-check', 'dispatch', 'gate', 'dispatch-reviews'])
+  assert.deepEqual(refused.blockers.map(b => [b.category, b.step]), [['missing-artifact', 'review-run']])
+  assert.match(refused.blockers[0].reason, /stamped for another run tip/)
+
+  // A phase reviewed only by the run still gates on the task tips it implemented.
+  const tips = await project(t, { scope: 'run' })
+  tips.env.hook = (command, options) => {
+    if (options.argv?.[1] !== 'gate') return
+    const ref = 'refs/heads/fleetmates/r1/T1'
+    git(tips.root, 'update-ref', ref, git(tips.root, 'commit-tree', git(tips.root, 'rev-parse', `${ref}^{tree}`), '-p', ref, '-m', 'feat: moved after implementation'))
+  }
+  const movedTips = await tips.run()
+  assert.deepEqual(commands(await tips.invocations()), ['init-run', 'preview-check', 'dispatch', 'gate'])
+  assert.deepEqual(movedTips.blockers.map(b => [b.category, b.step]), [['missing-artifact', 'gate-1']])
+  assert.match(movedTips.blockers[0].reason, /task tips moved after implementation/)
+
+  const line = await project(t, { scope: 'run' })
+  line.env.mode = 'run-gate-line'
+  const wrongLine = await line.run()
+  assert.deepEqual(wrongLine.blockers.map(b => [b.category, b.step]), [['missing-artifact', 'collect-run']])
+
+  // The run tip moves after the review was collected and accepted, before finish reads it.
+  const moved = await project(t, { scope: 'run' })
+  const report = await moved.run()
+  assert.equal(report.state, 'human-required', report.blockers.map(b => b.reason).join('; '))
+  const acceptance = await acceptanceFor(moved, report)
+  let collected = false, done = false
+  moved.env.hook = (command, options) => { if (options.argv?.[1] === 'collect-reviews') collected = true }
+  const now = () => {
+    if (collected && !done) { done = true; git(moved.root, 'commit', '--allow-empty', '-q', '-m', 'chore: after the run review') }
+    return Date.now()
+  }
+  const before = (await moved.invocations()).length
+  const late = await moved.resume({ acceptance, now })
+  assert.ok(done, 'the run tip moved after collection')
+  assert.deepEqual(commands(await moved.invocations()).slice(before), ['gate', 'collect-reviews'], 'finish never ran')
+  assert.deepEqual(late.blockers.map(b => [b.category, b.step]), [['changed-input', 'finish']])
+  assert.match(late.blockers[0].reason, /run tip moved after the run review/)
+})
+
+test('a blocked run review goes to fix --phase run, and a retry stops naming the fix task without dispatching or merging anything', async t => {
+  const fixture = await project(t, { scope: 'run' })
+  fixture.env.mode = 'run-review-blocks'
+  const report = await fixture.run()
+  const seen = await fixture.invocations()
+  assert.deepEqual(commands(seen), ['init-run', 'preview-check', 'dispatch', 'gate', 'dispatch-reviews', 'collect-reviews', 'fix'])
+  const verdictPath = path.join(fixture.root, '.fleetmates/r1/profile-verdict-run.json')
+  assert.deepEqual(seen.at(-1).args.slice(0, 7), ['fix', '--run', 'r1', '--phase', 'run', '--verdict', verdictPath])
+  const verdict = JSON.parse(await readFile(path.join(fixture.bin, 'verdict-seen.json'), 'utf8'))
+  assert.equal(verdict.phase, 'run', 'the verdict carries the run marker fix --phase run requires')
+  assert.equal(verdict.results[0].status, 'fail')
+  const runTip = git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1')
+  assert.equal(report.state, 'failed')
+  assert.deepEqual(report.blockers.map(b => [b.category, b.step]), [['code', 'collect-run']])
+  assert.equal(report.blockers[0].reason, `run-fix-required: fix-1 on fleetmates/r1/fix-1, cut from fleetmates/run/r1@${runTip}; this controller has no fragment that dispatches or integrates a run fix task`)
+  assert.equal(report.repair.phase, 'run')
+  assert.equal(report.repair.decision.tasks[0].taskId, 'fix-1')
+  assert.ok(!existsSync(path.join(fixture.root, '.fleetmates/r1/status.json')), 'no fix round is recorded for a task nobody dispatched')
+  assert.equal(git(fixture.root, 'rev-parse', 'refs/heads/fleetmates/run/r1'), runTip, 'nothing merged')
+
+  const cases = [
+    ['run-review-blocks run-fix-escalate', 'code', 'collect-run', /^fix-escalated: undeclared-path$/],
+    ['run-review-blocks run-fix-old-cut', 'infrastructure', 'fix-run', /no valid run fix task/],
+    ['run-review-blocks run-fix-plan-branch', 'infrastructure', 'fix-run', /no valid run fix task/],
+  ]
+  for (const [mode, category, step, reason] of cases) {
+    const other = await project(t, { scope: 'run' })
+    other.env.mode = mode
+    const stopped = await other.run()
+    assert.deepEqual(commands(await other.invocations()).at(-1), 'fix', mode)
+    assert.deepEqual(stopped.blockers.map(b => [b.category, b.step]), [[category, step]], mode)
+    assert.match(stopped.blockers[0].reason, reason, mode)
+  }
+  // The run repair bound is min(maxRepairRounds, the run fix budget, 2): a second round under a
+  // budget of one is exhausted before anyone is told to dispatch it.
+  const spent = await project(t, { scope: 'run' })
+  spent.env.mode = 'run-review-blocks run-fix-round-2'
+  const exhausted = await spent.run()
+  assert.deepEqual(exhausted.blockers.map(b => [b.category, b.step]), [['code', 'collect-run']])
+  assert.match(exhausted.blockers[0].reason, /^budget-exhausted: maxRepairRounds 2, run repair limit 1, round 2/)
+})
+
+test('expansion validation binds the review steps to the manifest scope', () => {
+  const sha = value => createHash('sha256').update(value).digest('hex')
+  const markdown = '### Task 1: First\n\n**Files:**\n- Create: `a.txt`\n'
+  const manifestText = JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', lens: ['correctness'], scope: 'run' }] } } })
+  const manifest = JSON.parse(manifestText)
+  const inputs = { commit: 'a'.repeat(40), plan: sha(markdown), manifest: sha(manifestText), context: 'c'.repeat(64), environment: 'e'.repeat(64), verifier: 'f'.repeat(64) }
+  const request = { runId: 'r1' }
+  const expanded = expandWorkflowProfile({ profile: 'bug-fix', runId: 'r1', planPath: 'plan.md', baseBranch: 'main', harness: 'codex', inputs, markdown, manifestText,
+    capabilities: { harness: 'available' }, integration: 'host-bounded', contracts: { environment: 'env.json', rolePolicy: 'roles.json' } })
+  assert.deepEqual(validateWorkflowExpansion(expanded, { inputs, request, manifest }), [1])
+  const rehash = value => { const { profileHash, ...rest } = value; return { ...rest, profileHash: sha(JSON.stringify(rest)) } }
+  const tamper = change => { const copy = structuredClone(expanded); change(copy); return rehash(copy) }
+  const refusals = [
+    [tamper(p => { p.steps.find(s => s.id === 'review-run').argv[6] = '1' }), /not a whitelisted CLI fragment/],
+    [tamper(p => { p.steps.find(s => s.id === 'collect-run').argv[6] = '1' }), /not a whitelisted CLI fragment/],
+    [tamper(p => { p.steps.find(s => s.id === 'collect-run').resultsPath = '.fleetmates/r1/reviews/results-1.json' }), /results path/],
+    [tamper(p => { p.steps.find(s => s.id === 'gate-1').argv.push('--results', '.fleetmates/r1/reviews/results-1.json') }), /gate must read/],
+    [tamper(p => { p.steps.splice(p.steps.findIndex(s => s.id === 'review-run'), 2) }), /fixed fragment set/],
+  ]
+  for (const [index, [value, reason]] of refusals.entries()) assert.throws(() => validateWorkflowExpansion(value, { inputs, request, manifest }), reason, `refusal ${index}`)
+  // The same expansion is refused against a phase-scoped manifest, which wants per-phase review steps.
+  const phaseScoped = { phases: { default: { checks: [{ ...manifest.phases.default.checks[0], scope: 'phase' }] } } }
+  assert.throws(() => validateWorkflowExpansion(expanded, { inputs, request, manifest: phaseScoped }), /fixed fragment set/)
 })
