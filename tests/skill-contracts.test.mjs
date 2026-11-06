@@ -1,19 +1,22 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile, readdir, mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { readFile, readdir, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { runCli } from '../scripts/cli.mjs'
 import { collectReviewResults } from '../scripts/reviews.mjs'
 import {
   assertClaim,
   assertCorpusInventory,
   claimSites,
+  corpusSites,
   statementsOf,
   assertCode,
   assertNoStatement,
   assertStatement,
   parseDoc,
+  readSkill,
   splitFrontmatter,
 } from './md-contract.mjs'
 
@@ -31,10 +34,13 @@ export async function allSkills() {
     .sort()
 }
 
+// A skill is its SKILL.md followed by its reference/*.md files, in name order, read as one corpus
+// by the shared reader in md-contract.mjs: `body` is every file's text, `doc` one document whose
+// section labels and corpus sites name the file each block came from. Every scan below that walks
+// `body` or `doc` therefore covers the references too.
 export async function skill(name) {
-  const text = await readFile(new URL(`${name}/SKILL.md`, dir), 'utf8')
-  const { fields, body } = splitFrontmatter(text, name)
-  return { fields, body, doc: parseDoc(body, `${name}/SKILL.md`) }
+  const { fields, body, doc } = await readSkill(name)
+  return { fields, body, doc }
 }
 
 test('every skill directory contains a SKILL.md with valid frontmatter', async () => {
@@ -1089,7 +1095,7 @@ const CLEANUP_EXCEPTION = /^The one exception is a task going to a fresh impleme
 const CLEANUP_DRY_RUN = /^Without --yes it removes nothing and prints the prunable and leaked-preview lists it would act on if nothing changes before the --yes run — both runs recompute the gate from scratch, so a phase that fails a check during the dry run and passes during the --yes run has worktrees force-removed that never appeared in the list the operator approved; the per-branch "left <branch> in place: not an ancestor" line is decided only while --yes runs the removal, so a dry run does not yet show which merged worktree's branch would survive\.$/i
 
 test('parallel-execution makes prune-run the only supported cleanup', async () => {
-  const doc = parseDoc(await readFile(new URL('parallel-execution/SKILL.md', dir), 'utf8'), 'parallel-execution')
+  const { doc } = await skill('parallel-execution')
   const cleanup = doc.section(/^5\. Clean up the phase$/)
   // The claim's antecedent ("This") is the code block above it. `statementsOf` never sees a code
   // block — only paragraphs and list items — so the `subject:` lock below cannot reach it, and a
@@ -1693,6 +1699,54 @@ test('every sentence about sweeping worktrees by hand, in either cleanup skill, 
 // it two or three times and the lock would encode nesting depth as if it were content. Adding an
 // unrelated `###` anywhere would then fail a lock about SubagentStop. Measured before the fix:
 // parallel-execution reported 316 statements for 154 sentences.
+// The shared corpus reader. A skill split into a core and reference files must read as ONE
+// document, or every lock in this file silently narrows to the core: a pinned sentence moved into a
+// reference would vanish from its section lock, and a cross-skill scan over `body` would never see
+// a relative cli.mjs or an unknown agent written there. The corpus label is the other half: an
+// inventory names the file each sentence came from, so moving a sentence between files fails the
+// lock as surely as rewording it.
+test('a skill is read as SKILL.md then reference/*.md in name order, one document labelled per file', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'tm-skill-corpus-'))
+  try {
+    const at = (rel) => path.join(root, 'x', rel)
+    await mkdir(at('reference/nested'), { recursive: true })
+    await writeFile(at('SKILL.md'), '---\nname: x\ndescription: Use when testing.\n---\n\n# X\n\n## Core\n\nCore marker sentence.')
+    await writeFile(at('reference/b.md'), '## From B\n\nB marker sentence.\n')
+    await writeFile(at('reference/a.md'), 'A marker opening line.\n\n## From A\n\nA marker sentence.\n')
+    await writeFile(at('reference/notes.txt'), '## Not markdown\n\nTxt marker sentence.\n')
+    await writeFile(at('reference/nested/c.md'), '## Nested\n\nNested marker sentence.\n')
+    const dir = pathToFileURL(root + path.sep)
+
+    const { fields, body, raw, doc, files } = await readSkill('x', { dir })
+    assert.equal(fields.name, 'x')
+    assert.deepEqual(files.map((f) => f.file), ['x/SKILL.md', 'x/reference/a.md', 'x/reference/b.md'])
+    assert.ok(!/name: x/.test(body) && /name: x/.test(raw), 'body drops the frontmatter, raw keeps it')
+    // The cross-skill scans (relative cli.mjs, unknown subcommand, unknown tm-* agent) walk `body`.
+    for (const text of [body, raw]) {
+      assert.ok(text.indexOf('Core marker') < text.indexOf('A marker opening') && text.indexOf('A marker sentence') < text.indexOf('B marker'),
+        'body and raw carry every file, SKILL.md first, references in name order')
+    }
+    assert.deepEqual(
+      doc.statements.map((s) => s.text),
+      ['Core marker sentence.', 'A marker opening line.', 'A marker sentence.', 'B marker sentence.'],
+      'each file is parsed on its own, so the core\'s last paragraph does not run on into a reference',
+    )
+    assert.equal(doc.section('From A').label, 'x/reference/a.md § From A')
+    assert.equal(doc.section('Core').label, 'x/SKILL.md § Core')
+    // claimSites lists a document's statements first, then its headings.
+    assert.deepEqual(corpusSites([{ label: 'x', doc }], /marker|From/), [
+      'x :: Core marker sentence.',
+      'x/reference/a.md :: A marker opening line.',
+      'x/reference/a.md :: A marker sentence.',
+      'x/reference/b.md :: B marker sentence.',
+      'x/reference/a.md :: From A',
+      'x/reference/b.md :: From B',
+    ])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
 test('a statement is counted once per document, not once per heading enclosing it', () => {
   const source = [
     '# Title',
@@ -2029,7 +2083,7 @@ test('parallel-execution bounds the SubagentStop guard rather than describing it
 // behaviour. The persistence claim is the one that is mechanically decidable, so it gets a real
 // assertion against the code that implements it.
 test('phase-gate states what still binds on a solo gate, and the persistence rule is true', async () => {
-  const text = await readFile(new URL('phase-gate/SKILL.md', dir), 'utf8')
+  const { raw: text } = await readSkill('phase-gate')
 
   const CLAIMS = [
     'a PASS reached after N rounds of fixes is reported as such, never as a clean first-pass PASS',

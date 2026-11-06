@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
-import { assertClaim, assertStatement, parseDoc } from './md-contract.mjs'
+import { assertClaim, assertStatement, parseDoc, readSkill } from './md-contract.mjs'
 import { STALL_HINT, renderLiveness } from '../scripts/liveness.mjs'
 
 const dir = new URL('../skills/', import.meta.url)
@@ -14,14 +14,11 @@ async function allSkills() {
     .sort()
 }
 
-async function skill(name) {
-  const text = await readFile(new URL(`${name}/SKILL.md`, dir), 'utf8')
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
-  assert.ok(match, `${name} has no frontmatter`)
-  const fields = Object.fromEntries(
-    match[1].split(/\r?\n/).map((l) => [l.slice(0, l.indexOf(':')).trim(), l.slice(l.indexOf(':') + 1).trim()]),
-  )
-  return { fields, body: text.slice(match[0].length) }
+// The shared corpus reader: SKILL.md followed by reference/*.md in name order, so every scan over
+// `body` below — the cross-skill ones included — covers a skill's reference files as well.
+async function skill(name, options) {
+  const { fields, body, doc } = await readSkill(name, options)
+  return { fields, body, doc }
 }
 
 test('every required fleet skill is present', async () => {
@@ -212,8 +209,7 @@ test('stripComments removes a markdown comment, so a commented instruction canno
 })
 
 test('parallel-execution starts the watchdog under Monitor in its own section between sections 2 and 3', async () => {
-  const { body } = await skill('parallel-execution')
-  const doc = parseDoc(stripComments(body), 'parallel-execution')
+  const { doc } = await skill('parallel-execution', { transform: stripComments })
   const watch = doc.section(/^Watch the phase$/)
   assert.equal(watch.level, 2, 'Watch the phase must be a top-level section')
   const top = doc.sections.filter((s) => s.level === 2).map((s) => s.title)
@@ -232,8 +228,7 @@ test('parallel-execution starts the watchdog under Monitor in its own section be
 })
 
 test('fleet-supervision documents the watchdog events and the commands each response runs', async () => {
-  const { body } = await skill('fleet-supervision')
-  const doc = parseDoc(stripComments(body), 'fleet-supervision')
+  const { doc } = await skill('fleet-supervision', { transform: stripComments })
   const watchdog = doc.section(/^The watchdog$/)
   const raw = rawOf(watchdog)
   for (const event of ['start', 'resume', 'respawn', 'orphan', 'unmeasured', 'watch-error', 'exit']) {

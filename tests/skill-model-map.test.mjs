@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { parseDoc, splitFrontmatter, assertStatement, assertNoStatement } from './md-contract.mjs'
+import { parseDoc, readSkill, splitFrontmatter, assertStatement, assertNoStatement } from './md-contract.mjs'
 
 // The tier->model map lives only in skill text: config stores tiers, never models. These tests pin
 // the Claude map in `parallel-execution` to the measured routing (`mid` on opus, see
@@ -24,8 +24,10 @@ const withFrontmatter = async (rel, label) => {
   return parseDoc(body, rel)
 }
 
-const skill = () => withFrontmatter('skills/parallel-execution/SKILL.md', 'parallel-execution')
-const phaseGate = () => withFrontmatter('skills/phase-gate/SKILL.md', 'phase-gate')
+// The skills through the shared corpus reader: SKILL.md followed by reference/*.md, comments
+// stripped from every file, so a section is found in whichever file of the skill holds it.
+const skill = async () => (await readSkill('parallel-execution', { transform: stripComments })).doc
+const phaseGate = async () => (await readSkill('phase-gate', { transform: stripComments })).doc
 const integrator = () => withFrontmatter('agents/tm-integrator.md', 'tm-integrator')
 const readmeText = async () => stripComments(await read('README.md'))
 const readme = async () => parseDoc(await readmeText(), 'README.md')
