@@ -215,3 +215,7 @@ Before handing the plan off, check:
 - **Placeholder scan** — no "TBD", "similar to Task N", or other stand-ins remain.
 - **Type consistency** — the same field, function, or shape is described identically wherever
   it appears across tasks.
+- **Statement check** — re-read the task statement the plan was written from: the Out of Scope
+  section excludes nothing the statement requires, and every task a `**Depends:**` line names
+  exists in the plan. Nothing enforces this check: gates and reviewers judge the work against the
+  plan, so a plan that leaves out what the statement requires passes every gate.

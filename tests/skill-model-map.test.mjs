@@ -65,6 +65,18 @@ test('the workflow example passes the same map through --models', async () => {
   assert.deepEqual(JSON.parse(json[1]), EXPECTED_MAP)
 })
 
+// The core restates the map so a run needs no reference file to dispatch, which makes it a second
+// copy that can drift. Both copies are held to the same expected map, so a change to either one
+// alone fails here.
+test('the core dispatch step carries the same tier map and passes it to workflow through --models', async () => {
+  const core = (await skill()).section(/^Dispatch a phase$/)
+  assert.equal(core.label, 'parallel-execution/SKILL.md § Dispatch a phase', 'the core map must live in SKILL.md itself')
+  assert.deepEqual(skillMap(core), EXPECTED_MAP)
+  const examples = core.code.filter((b) => /\bworkflow\b/.test(b.code) && /--models/.test(b.code))
+  assert.equal(examples.length, 1, 'the core dispatch step must hold exactly one workflow --models example')
+  assert.deepEqual(JSON.parse(/--models\s+'([^']*)'/.exec(examples[0].code)[1]), EXPECTED_MAP)
+})
+
 // Any sentence naming both `mid` and sonnet is taken to say mid means sonnet, unless it describes
 // restoring sonnet. A verb list ("means", "is", "runs on") let "resolves to", "dispatches to" and
 // "uses" through; this does not depend on the verb at all.

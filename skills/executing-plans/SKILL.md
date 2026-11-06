@@ -31,6 +31,12 @@ Never start implementation on `main`/`master` without explicit consent from your
 Read it fully before touching code. Raise concerns with your human partner before starting —
 gaps, unclear steps, or a task that looks bigger than a single sitting.
 
+Before the first task, re-read the task statement the plan was written from and confirm two
+things: the plan's Out of Scope section excludes nothing the statement requires, and every task a
+`**Depends:**` line names exists in the plan. Nothing enforces this check: the plan's own
+verification steps judge the work against the plan, so a plan that leaves out what the statement
+requires passes them.
+
 ## 3. Execute and checkpoint
 
 Work through tasks in dependency order. Follow each step; run the verifications it specifies.

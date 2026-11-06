@@ -412,16 +412,20 @@ const PG_RESULTS_PATH_LEXICON =
   /--results|results file|results\.json|results-<phase>|results written to|redirect|captur(e|es|ing|ed)|head -n -1|round-trip|stdout|pip(e|es|ing|ed)|\b(that|this) path\b/i
 
 const PG_RESULTS_PATH_CORPUS = [
-  "phase-gate :: To rebuild the results file from those drops rather than by hand:",
-  "phase-gate :: It prints a --results file with source: \"file\", applying the manifest's own blockOn.",
-  "phase-gate :: It also writes that same document to .fleetmates/<runId>/reviews/results-<phase>.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix.",
-  "phase-gate :: Pass the written path, not a capture of stdout: a > results.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped { \"results\": [...] }, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree.",
-  "phase-gate :: The file's existence is itself the claim: the previous results-<phase>.json is removed at the start of the command body, before the manifest is read and before any findings file is opened, so every refusal that judges this round's work is downstream of the clear and leaves no results file behind — measured, by making a second round refuse on a stale stamp and watching the first round's file go with it.",
-  "phase-gate :: And the clear itself can fail: a previous file that can be neither unlinked nor emptied exits 4 with could not clear the previous results file at …, and a reviews directory that is a symlink exits 4 with … must be a real directory before the clear is even attempted; either way the earlier round's file is still on disk saying what that round said.",
-  "phase-gate :: After any refusal, hand gate --results nothing at all: only a path printed on a results written to … line is this command's answer, and no refusal prints one — least of all the clear failure above, which names that very path while refusing to stand behind what is at it.",
-  "phase-gate :: Scoping to the success line is what closes a bypass, and the bypass was measured too: a round-2 collection refused at the clear over findings carrying a blocking high, and gate --results on the path that refusal itself printed exited 0 with verdict PASS over round 1's document.",
-  "phase-gate :: A third condition exits 4 and does print something usable: when the collection succeeded and only the write failed, the complete results go to stdout above cannot write the results file at …, so keep those bytes rather than re-running the reviews — but drop that last line before passing them on, because a plain redirect captures it and gate --results then exits 2 for exactly the reason above; head -n -1 is enough, and with it the gate exits 0 with verdict PASS, measured on this tree.",
-  "phase-gate :: Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file; a check name, kind or preview.link entry out of the gate manifest, whose contents this CLI validates for shape and not for content; the bytes a JSON parse error quotes back out of a --results file or the verdict file fix is handed below — the value is printed with its control bytes and line separators replaced by a visible <0x1B>-style token.",
+  // The core restates the rule in two sentences, for the phase and for the run; both were reviewed
+  // against the reference sentences below, which keep the measured detail.
+  "phase-gate :: Hand the gate the path printed on the results written to … line, never a capture of stdout; a refusal prints no such line, and then there is nothing to hand on:",
+  "phase-gate :: finish --run <runId> --plan <planPath> --root <project root> --results <that file>.",
+  "phase-gate/reference/review-results.md :: To rebuild the results file from those drops rather than by hand:",
+  "phase-gate/reference/review-results.md :: It prints a --results file with source: \"file\", applying the manifest's own blockOn.",
+  "phase-gate/reference/review-results.md :: It also writes that same document to .fleetmates/<runId>/reviews/results-<phase>.json and prints that path last, so the gate --results <path> that follows names a file that exists — run without a redirect and without this, the review check stays pending forever while the gate reports FAIL with an empty failed list, naming nothing to fix.",
+  "phase-gate/reference/review-results.md :: Pass the written path, not a capture of stdout: a > results.json redirect no longer round-trips, because the trailing path line is inside the captured bytes and gate --results on that capture exits 2 on --results must be a readable JSON file shaped { \"results\": [...] }, while the file the same command wrote exits 0 with verdict PASS — both measured on this tree.",
+  "phase-gate/reference/review-results.md :: The file's existence is itself the claim: the previous results-<phase>.json is removed at the start of the command body, before the manifest is read and before any findings file is opened, so every refusal that judges this round's work is downstream of the clear and leaves no results file behind — measured, by making a second round refuse on a stale stamp and watching the first round's file go with it.",
+  "phase-gate/reference/review-results.md :: And the clear itself can fail: a previous file that can be neither unlinked nor emptied exits 4 with could not clear the previous results file at …, and a reviews directory that is a symlink exits 4 with … must be a real directory before the clear is even attempted; either way the earlier round's file is still on disk saying what that round said.",
+  "phase-gate/reference/review-results.md :: After any refusal, hand gate --results nothing at all: only a path printed on a results written to … line is this command's answer, and no refusal prints one — least of all the clear failure above, which names that very path while refusing to stand behind what is at it.",
+  "phase-gate/reference/review-results.md :: Scoping to the success line is what closes a bypass, and the bypass was measured too: a round-2 collection refused at the clear over findings carrying a blocking high, and gate --results on the path that refusal itself printed exited 0 with verdict PASS over round 1's document.",
+  "phase-gate/reference/review-results.md :: A third condition exits 4 and does print something usable: when the collection succeeded and only the write failed, the complete results go to stdout above cannot write the results file at …, so keep those bytes rather than re-running the reviews — but drop that last line before passing them on, because a plain redirect captures it and gate --results then exits 2 for exactly the reason above; head -n -1 is enough, and with it the gate exits 0 with verdict PASS, measured on this tree.",
+  "phase-gate/reference/review-results.md :: Where a line quotes a value an agent wrote — a lens, a stamp or a reason out of a findings file; a check name, kind or preview.link entry out of the gate manifest, whose contents this CLI validates for shape and not for content; the bytes a JSON parse error quotes back out of a --results file or the verdict file fix is handed below — the value is printed with its control bytes and line separators replaced by a visible <0x1B>-style token.",
 ]
 
 test('every sentence in phase-gate about where the results file is, in any section, is one a human locked', async () => {
@@ -1601,13 +1605,13 @@ const SUBAGENT_STOP_CORPUS = [
   "fleet-supervision :: But SubagentStop fires only when a teammate actually stops — a stalled or parked teammate never reaches it, so liveness remains the only thing that sees a teammate which never stops at all.",
   "fleet-supervision :: No stop-path hook fires for a parked agent.",
   "fleet-supervision :: The SubagentStop backstop",
-  "parallel-execution :: What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.",
-  "parallel-execution :: The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.",
-  "parallel-execution :: Only a task-scoped failure refuses the stop, meaning fileset or merge, so a refused stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported and the stop is allowed.",
-  "parallel-execution :: The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.",
-  "parallel-execution :: The hook resolves a stopping teammate through records under .fleetmates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.",
-  "parallel-execution :: The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.",
-  "parallel-execution :: It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
+  "parallel-execution/reference/init-and-dispatch.md :: What it decides is whether the stop-time checks are allowed to be a verdict: complete --enforcement-only compares the recorded run branch against the branch the main worktree has checked out, and when it is absent or different it reports that it cannot verify completion and the stop is allowed.",
+  "parallel-execution/reference/init-and-dispatch.md :: The SubagentStop hook does two cheap things at that moment: it blocks a teammate whose task branch does not exist, and it runs complete --enforcement-only.",
+  "parallel-execution/reference/init-and-dispatch.md :: Only a task-scoped failure refuses the stop, meaning fileset or merge, so a refused stop is not always about a file set; an ownership failure with no task-scoped failure beside it is reported and the stop is allowed.",
+  "parallel-execution/reference/init-and-dispatch.md :: The teammate is shown none of that detail — the hook reads the exit status and never forwards what the check printed.",
+  "parallel-execution/reference/init-and-dispatch.md :: The hook resolves a stopping teammate through records under .fleetmates/, which is gitignored and writable by every teammate, and it allows the stop on anything it cannot establish — a teammate it cannot resolve, a plan it cannot read, a recorded run branch that is not the branch checked out.",
+  "parallel-execution/reference/init-and-dispatch.md :: The hook can only ever add a block that would not otherwise happen, so declining to block on anything it cannot establish is what keeps an unreadable record from costing a teammate a turn.",
+  "parallel-execution/reference/init-and-dispatch.md :: It is not a guarantee against being blocked over foreign state: the records are teammate-writable, so a planted location record makes the hook establish something false and block whoever stops in the worktree that record keys on — resolution is by worktree path, not by teammate identity, and any linked worktree of this repository qualifies, including a reviewer's scratch one.",
   "tm-implementer.md :: Stopping without running that gate is caught, not waved through: a SubagentStop hook runs the enforcement checks at stop time and can refuse the stop.",
 ]
 
@@ -1672,13 +1676,13 @@ const HAND_SWEEP_LEXICON = /rm -rf|rm -fr|by hand|hand-run|hand sweep/i
 
 const HAND_SWEEP_CORPUS = [
   "finishing-a-development-branch :: Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at.",
-  "parallel-execution :: On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand.",
-  "parallel-execution :: On either direct-Agent path — the fallback above and the fewer-than-three-task case — build each teammate's brief with the CLI rather than composing it by hand:",
-  "parallel-execution :: Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure \"merged\" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch.",
-  "parallel-execution :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
-  "parallel-execution :: Prune with the command rather than by hand:",
-  "parallel-execution :: Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand — the command above already covers this case.",
-  "parallel-execution :: The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with \"already used by worktree\"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover.",
+  "parallel-execution/reference/cleanup-and-worktrees.md :: Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure \"merged\" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch.",
+  "parallel-execution/reference/cleanup-and-worktrees.md :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
+  "parallel-execution/reference/cleanup-and-worktrees.md :: Prune with the command rather than by hand:",
+  "parallel-execution/reference/cleanup-and-worktrees.md :: Once the phase has a recorded PASS, run prune-run to remove the worktree, not git worktree remove by hand — the command above already covers this case.",
+  "parallel-execution/reference/cleanup-and-worktrees.md :: The one exception is a task going to a fresh implementer instead of a resume, because resuming stalled: prune that task's worktree first, since prune-run only removes a worktree whose phase already recomputes to PASS and a mid-phase stall has none yet to rest that removal on — do it by hand with git worktree remove --force <path>, then git worktree prune; --force is required and authorised here, because a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over, and discarding that work is the deliberate point of abandoning it for a fresh implementer — that authorisation covers the teammate's unfinished work only, not a junction: --force still follows one out of the worktree and deletes its target, and nothing unlinks it first the way it does for a leaked preview, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — because a returned teammate's worktree keeps its branch checked out and the new dispatch would otherwise fail with \"already used by worktree\"; then restate the findings, the branch and the file set in its dispatch, because none of that survives the handover.",
+  "parallel-execution/reference/init-and-dispatch.md :: On a detached HEAD init-run records the literal string HEAD, which is not a run branch and which no command overwrites, so it disarms the second layer until the field is removed by hand.",
+  "parallel-execution/reference/init-and-dispatch.md :: On either direct-Agent path — the fallback above and the fewer-than-three-task case — build each teammate's brief with the CLI rather than composing it by hand:",
 ]
 
 test('every sentence about sweeping worktrees by hand, in either cleanup skill, is one a human locked', async () => {
@@ -2103,4 +2107,210 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
   assert.match(persistSite.slice(0, 200), /if \(status\) \{/,
     'the gate verdict must be persisted only under `if (status)`; if that guard moves, the ' +
     'solo-gate persistence rule the skill states is no longer true and must be rewritten')
+})
+
+// ---------------------------------------------------------------------------------------------
+// The split skills: a core every run loads, plus reference files read on demand.
+// ---------------------------------------------------------------------------------------------
+
+// The point of the split is what an orchestrator re-reads on every call, so the bound is on the
+// core file alone, in bytes as it ships. It says nothing about how much of a reference a run ends
+// up reading, and nothing about the other skills, which are not split.
+const CORE_LIMIT_BYTES = 8 * 1024
+
+test('the parallel-execution and phase-gate cores are each at most 8 KB', async () => {
+  for (const name of ['parallel-execution', 'phase-gate']) {
+    const { files } = await readSkill(name)
+    const bytes = Buffer.byteLength(files[0].text, 'utf8')
+    assert.ok(bytes <= CORE_LIMIT_BYTES, `${name}/SKILL.md is ${bytes} bytes; the core must stay at most ${CORE_LIMIT_BYTES}`)
+    assert.ok(files.length > 1, `${name} must keep its rare sections in reference/ files`)
+  }
+})
+
+// A reference file no core names is never read, so whatever it holds is invisible at runtime while
+// every lock above still passes over it. Each core therefore ends with a table mapping a situation
+// to the file to read, and the table must name every reference file exactly once and nothing
+// else. What this cannot check is whether a row's situation describes its file well.
+test('every skill with reference files ends its core with a table naming each of them exactly once', async () => {
+  const split = []
+  for (const name of await allSkills()) {
+    const { files } = await readSkill(name)
+    const refs = files.slice(1).map((f) => f.path)
+    if (refs.length === 0) continue
+    split.push(name)
+    const lines = files[0].text.trimEnd().split(/\r?\n/)
+    let at = lines.length
+    while (at > 0 && lines[at - 1].startsWith('|')) at--
+    const table = lines.slice(at)
+    assert.ok(table.length >= 3, `${name}/SKILL.md must END with the situation -> reference table`)
+    assert.match(table[0], /^\|\s*Situation\s*\|\s*Read\s*\|$/, `${name}: the closing table's header must be | Situation | Read |`)
+    assert.match(table[1], /^\|-+\|-+\|$/, `${name}: the closing table needs its delimiter row`)
+    assert.match(lines[at - 2] ?? '', /^## /, `${name}: the closing table must sit directly under its own heading`)
+    const named = table.slice(2).map((row) => {
+      const m = /^\|[^|]+\|\s*`(reference\/[^`|]+\.md)`\s*\|$/.exec(row)
+      assert.ok(m, `${name}: every row of the closing table names one reference file in its last cell: ${row}`)
+      return m[1]
+    })
+    assert.deepEqual([...named].sort(), refs, `${name}: the closing table must name each reference file exactly once, and only files that exist`)
+  }
+  assert.deepEqual(split, ['parallel-execution', 'phase-gate'], 'the skills split into a core and references')
+})
+
+test('parallel-execution, executing-plans and writing-plans each carry the plan check, stated as unenforced', async () => {
+  const pe = (await skill('parallel-execution')).doc.section(/^Check the plan before init-run$/)
+  assert.equal(pe.label, 'parallel-execution/SKILL.md § Check the plan before init-run', 'the plan check belongs to the core')
+  assertClaim(pe, {
+    label: 'plan check (parallel-execution)',
+    claim: /^Before init-run, re-read the task statement the plan was written from and confirm two things: the plan's Out of Scope section excludes nothing the statement requires, and every task a Depends: line names exists in the plan\.$/,
+    then: /^Nothing enforces this check: gates and reviewers judge the work against the plan, so a plan that leaves out what the statement requires passes every gate\.$/,
+    subject: /Out of Scope|Depends|statement|enforce/i,
+  })
+  assertClaim((await skill('executing-plans')).doc.section(/^2\. Review the plan critically$/), {
+    label: 'plan check (executing-plans)',
+    claim: /^Before the first task, re-read the task statement the plan was written from and confirm two things: the plan's Out of Scope section excludes nothing the statement requires, and every task a Depends: line names exists in the plan\.$/,
+    then: /^Nothing enforces this check: the plan's own verification steps judge the work against the plan, so a plan that leaves out what the statement requires passes them\.$/,
+    subject: /Out of Scope|Depends|statement|enforce/i,
+  })
+  assertClaim((await skill('writing-plans')).doc.section(/^Self-review$/), {
+    label: 'plan check (writing-plans)',
+    claim: /^Statement check — re-read the task statement the plan was written from: the Out of Scope section excludes nothing the statement requires, and every task a Depends: line names exists in the plan\.$/,
+    then: /^Nothing enforces this check: gates and reviewers judge the work against the plan, so a plan that leaves out what the statement requires passes every gate\.$/,
+    subject: /Out of Scope|Depends|task statement|enforce/i,
+  })
+})
+
+test('parallel-execution writes the Workflow script with --out, and states what that does not keep out', async () => {
+  const dispatch = (await skill('parallel-execution')).doc.section(/^Dispatch a phase$/)
+  assert.equal(dispatch.label, 'parallel-execution/SKILL.md § Dispatch a phase')
+  assertCode(dispatch, /cli\.mjs" workflow --run <runId> --phase <n> [^\n]*\\\n\s+--models '[^']+' --out <file>$/, 'the core workflow invocation must pass --out')
+  assertClaim(dispatch, {
+    label: 'workflow --out',
+    claim: /^With --out, workflow prints only the file's path and a one-line summary, so the script stays out of your context\.$/,
+    then: /^That holds for this command's output only: without --out it prints the whole script, and reading the file back loads it all the same\.$/,
+    subject: /--out|\bscript\b/i,
+    allow: [/^Write the script to a file, then invoke Workflow with that file:$/],
+  })
+})
+
+test('parallel-execution starts the watchdog on the direct-Agent path only, and its idle exit is silent', async () => {
+  const watch = (await skill('parallel-execution')).doc.section(/^Watch the phase$/)
+  assertStatement(watch, /^On the direct-Agent path, start the fleet watchdog after dispatching a phase, unless watch\.enabled is false:$/, 'the watchdog is started on the direct-Agent path')
+  assertClaim(watch, {
+    label: 'no watchdog on the Workflow path',
+    claim: /^Do not start the watchdog on the Workflow path: the Workflow's completion notification already wakes you\.$/,
+    then: /^The cost is the stall signal: nothing watches the teammates inside a running Workflow, so a stall there surfaces only through the Workflow itself\.$/,
+    subject: /Workflow/,
+  })
+  assertClaim(watch, {
+    label: 'silent idle exit',
+    claim: /^Once every task of the current phase is done, blocked or orphaned in the run status, it exits 0 and prints nothing\.$/,
+    subject: /phase-idle|\bexit(s|ed)?\b|prints/i,
+    allow: [
+      /^After its start line it prints only events that need an answer, and exit only when it ends on errors\.$/,
+      /^Run it with Monitor, so each line it prints to stdout arrives as one JSON event; the fleet-supervision skill says how to answer each one\.$/,
+      /^While one holds \.fleetmates\/<runId>\/watch\.lock, a second watch on the same run exits 2 and names the pid holding the lock\.$/,
+      /^With watch\.enabled set to false, watch prints watchdog disabled by watch\.enabled and exits 0\.$/,
+    ],
+  })
+  const supervision = (await skill('fleet-supervision')).doc
+  assertStatement(supervision.section(/^The watchdog$/), /^Once nothing in the phase is in flight, watch exits 0 without printing an event\.$/, 'fleet-supervision must describe the silent idle exit')
+  for (const doc of [supervision, (await skill('parallel-execution')).doc]) {
+    assertNoStatement(doc, /phase-idle/, 'watch no longer prints an exit event with reason phase-idle')
+  }
+})
+
+test('parallel-execution forbids self-inspection except to investigate a FAIL or a conflict, and states the cost', async () => {
+  const section = (await skill('parallel-execution')).doc.section(/^Read results, not diffs$/)
+  assert.equal(section.label, 'parallel-execution/SKILL.md § Read results, not diffs')
+  assertClaim(section, {
+    label: 'no self-inspection',
+    claim: /^Do not review diffs and do not re-run the suites the gate runs\.$/,
+    then: /^Read the CLI's output and the results teammates return; running gate and finish is the verification\.$/,
+    subject: /diff|re-run|suite|inspect|verif/i,
+    allow: [
+      /^The exception is investigating a FAIL verdict or a merge conflict, where reading the failing diff and re-running the failing command is the investigation\.$/,
+    ],
+  })
+  assertClaim(section, {
+    label: 'self-inspection exception and limit',
+    claim: /^The exception is investigating a FAIL verdict or a merge conflict, where reading the failing diff and re-running the failing command is the investigation\.$/,
+    then: /^This saves context and adds no check: a defect the gate and the reviewers miss, you miss too\.$/,
+  })
+})
+
+test('the run review: parallel-execution routes to it, phase-gate states the flow, the fix route and its limits', async () => {
+  const pe = (await skill('parallel-execution')).doc.section(/^Review the run$/)
+  assertStatement(pe, /^After the last phase is integrated, run the run review in phase-gate, section "Review the run"\.$/, 'parallel-execution must route to the run review')
+  assertClaim(pe, {
+    label: 'run review pointer',
+    claim: /^It judges the integrated diff once, and its fix route sends findings to a fix-<n> task that a tm-implementer fixes and tm-integrator merges\.$/,
+    then: /^A review check scoped phase is not part of it: phase-gate reviews that one inside each phase gate\.$/,
+  })
+
+  const run = (await skill('phase-gate')).doc.section(/^Review the run$/)
+  assert.equal(run.label, 'phase-gate/SKILL.md § Review the run', 'the run review belongs to the phase-gate core')
+  assertClaim(run, {
+    label: 'run review scope',
+    claim: /^A review check scoped run in fleetmates\.gate\.json belongs to no phase gate\.$/,
+    then: /^It is judged once, after the last phase is integrated, on the run's integrated diff merge-base\(base, run branch\)\.\.run branch\.$/,
+  })
+  const steps = [
+    /^review-dispatch --phase run, then the reviewers and the refute pass as above\.$/,
+    /^collect-reviews --phase run, which writes \.fleetmates\/<runId>\/reviews\/results-run\.json, already shaped for finish\.$/,
+    /^finish --run <runId> --plan <planPath> --root <project root> --results <that file>\.$/,
+  ]
+  const at = steps.map((p) => run.statements.findIndex((s) => p.test(s.text)))
+  assert.ok(at.every((i) => i >= 0), `the run review must list its three steps: ${JSON.stringify(at)}`)
+  assert.deepEqual([...at].sort((a, b) => a - b), at, 'the run review steps must come in order: dispatch, collect, finish')
+  assertStatement(run, /^A commit on the run branch after the review makes its findings stale, and collect-reviews refuses them\.$/, 'stale run findings')
+  assertCode(run, /^node "<fleetmates root>\/scripts\/cli\.mjs" fix --run <runId> --phase run --verdict <that file> --root <project root>$/, 'the run fix decision is fix --phase run on the collected file')
+  assertClaim(run, {
+    label: 'run retry brief',
+    claim: /^On retry it names one task, fix-<n>, with its branch, the cutFrom tip, its files and its findings\.$/,
+    then: /^The brief command renders plan tasks only, so brief a tm-implementer yourself from that output: create the branch at cutFrom, change only those files, fix those findings\.$/,
+  })
+  assertClaim(run, {
+    label: 'run fix round record and integration',
+    claim: /^Record the round once, when you dispatch it, with record-fix-round --run <runId> --phase run --task fix-<n>\.$/,
+    then: /^When the task returns, detach the main worktree and dispatch tm-integrator to merge the fix branch with --no-ff, then run the run review and finish again from step 1\.$/,
+  })
+  assertClaim(run, {
+    label: 'run fix budget',
+    claim: /^When the task returns, detach the main worktree and dispatch tm-integrator/,
+    then: /^The budget is the run's fixRounds, at most two rounds, and then the decision is escalate; none and escalate mean what they mean for a phase\.$/,
+  })
+  assertClaim(run, {
+    label: 'fix branch bound',
+    claim: /^ownership bounds a fix branch by every path the plan declares, not by the files that fix emitted, because that list is run state and no check reads run state\.$/,
+    subject: /\bownership\b|declare[sd]?\b|emitted/i,
+    allow: [/^A failing command check in the run gate leaves no verdict document for fix/],
+  })
+  assertClaim(run, {
+    label: 'routable findings',
+    claim: /^Only review findings are routable\.$/,
+    then: /^A failing command check in the run gate leaves no verdict document for fix, so report it as an escalation; a fileset-run failure escalates, and so does a finding that cites a path no plan task declares\.$/,
+  })
+  assertStatement(run, /^The workflow-execute controller stops with run-fix-required on a run retry instead of running the round; continue the route from there as above\.$/, 'the controller gap')
+  assertStatement(run, /^A review check scoped phase is not reviewed here: it keeps a review per phase, through the same commands with --phase <n>\.$/, 'phase scope keeps per-phase review')
+})
+
+// The cores restate, in short, rules their reference files state in full, because every run needs
+// them and a run should not have to open a reference to follow them. A restatement is a second copy
+// that can drift on its own, so each is pinned here; the full statements stay pinned where they
+// live. This pins the short copies' words, not their agreement with the long ones.
+test('the cores restate the per-run rules of their references', async () => {
+  const checks = (await skill('phase-gate')).doc.section(/^Agent and mcp checks$/)
+  assertClaim(checks, {
+    label: 'unnamed reviewers (core)',
+    claim: /^Dispatch one tm-reviewer per lens it prints, in parallel and without a name: a named reviewer goes idle without returning its result\.$/,
+    then: /^Each carries the model and effort the dispatch names; with agents\.reviewer\.tier unset that is the fixed capable tier, never the session's model\.$/,
+  })
+  assertStatement(checks, /^Each reviewer writes its findings to \.fleetmates\/<runId>\/reviews\/<phase>-<lens>\.json, and a lens with neither a response nor that file is missing, not clean\.$/, 'a missing lens is not clean')
+  assertStatement(checks, /^Take every finding at a blockOn severity to a second reviewer prompted to refute it; only findings that survive block\.$/, 'the refute pass')
+  assertStatement(checks, /^A missing optional server is recorded skip, and said out loud\.$/, 'a missing optional mcp server')
+
+  const after = (await skill('parallel-execution')).doc.section(/^After a phase returns$/)
+  assertStatement(after, /^Append every result to status\.json; a teammate that returned nothing is orphaned, not done\.$/, 'orphaned, not done')
+  assertStatement(after, /^Only on PASS, detach the main worktree \(next section\) and dispatch tm-integrator to merge the teammate branches in dependency order with --no-ff\.$/, 'integrate only on PASS')
+  assertStatement(after, /^It removes only worktrees whose phase recomputes to PASS, and the removal cannot be undone\.$/, 'prune-run scope and irreversibility')
 })
