@@ -20,7 +20,7 @@ import { readSessionUsage } from './usage-store.mjs'
 import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
-import { composeBrief } from './brief.mjs'
+import { composeBatchBrief, composeBrief } from './brief.mjs'
 import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
@@ -46,7 +46,7 @@ import { summarizeRun, renderRunSummary, renderPlanNotes, suppliedForPhase, vali
 import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
 import { previewOwnerMarkerPath, previewClaimPrefix } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
-import { generatePhaseWorkflow } from './workflow-gen.mjs'
+import { batchTasks, generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec, gitDirWritable } from './git.mjs'
 import { getAdapter, HARNESS_NAMES } from './harnesses/index.mjs'
 import { dispatchPhase, waitForExit, runPool, killProcess, pidAlive } from './driver.mjs'
@@ -203,7 +203,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
-  brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
+  brief    --run <id> --task <id>... --plan <path> [--base <branch>] [--fix-round] [--root <path>]
   workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>] [--out <path>]
   dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>] [--fix-round --task <id>...] [--execution <absolute-json-path>]
   dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
@@ -3048,6 +3048,7 @@ async function resolveGateConfig(root, io) {
 // having removed nothing, while `config get agents.implementer` printed `[object Object]`.
 const CONFIG_KEYS = [
   'maxParallel',
+  'batchSize',
   'caveman',
   ...ROLES.flatMap((role) => [`agents.${role}.tier`, `agents.${role}.effort`]),
   // The watchdog's knobs, so `get` and `unset` accept every key `set` already validates.
@@ -4507,8 +4508,27 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no run ${runId} — run init-run first`); return 4 }
-    const task = (plan.tasks ?? []).find((t) => t.id === flags.task)
-    if (!task) { io.out(`no task ${printable(flags.task)} in run ${runId}`); return 4 }
+    // Repeated `--task` composes one BATCH brief: the tasks in the order named, done by one
+    // teammate in one worktree, each on its own branch (docs/specs/2026-11-06-cost-cuts-design.md,
+    // section 5). A batch has one model and belongs to one phase, so tasks of different tiers or
+    // phases are refused rather than briefed together. One `--task` renders the single brief.
+    const named = repeated.task ?? [flags.task]
+    const repeatedId = named.find((id, i) => named.indexOf(id) !== i)
+    if (repeatedId !== undefined) { io.out(`--task names ${printable(repeatedId)} more than once`); return 2 }
+    const batch = []
+    for (const id of named) {
+      const found = (plan.tasks ?? []).find((t) => t.id === id)
+      if (!found) { io.out(`no task ${printable(id)} in run ${runId}`); return 4 }
+      batch.push(found)
+    }
+    for (const [field, label, rule] of [['tier', 'tiers', 'a batch runs on one model'], ['phase', 'phases', 'a batch belongs to one phase']]) {
+      if (new Set(batch.map((t) => t[field])).size > 1) {
+        const shown = batch.map((t) => `${printable(t.id)} ${field === 'phase' ? 'phase ' : ''}${printable(String(t[field] ?? '-'))}`).join(', ')
+        io.out(`--task names tasks of different ${label} (${shown}); ${rule}`)
+        return 2
+      }
+    }
+    const [task] = batch
 
     const contextAnchor = {}
     const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
@@ -4516,8 +4536,21 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const { learningBundles } = await import('./learning-context.mjs')
     let contextBundles
-    try { contextBundles = await learningBundles({ ...contextAnchor, tasks: [task] }) }
+    try { contextBundles = await learningBundles({ ...contextAnchor, tasks: batch }) }
     catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+    if (batch.length > 1) {
+      io.out(composeBatchBrief({
+        tasks: batch.map((t) => ({ ...t, branch: taskBranchName(runId, t.id) })),
+        contextBundles,
+        runId,
+        planPath,
+        baseBranch,
+        constraints: parseConstraints(planMarkdown),
+        caveman: resolved.caveman,
+        fixRound: flags['fix-round'] === true,
+      }))
+      return 0
+    }
     io.out(composeBrief({
       // `taskBranchName` is the single definition of `fleetmates/${runId}/${taskId}`, and the
       // gate resolves the branch through it. A brief restating the shape could name a ref
@@ -4651,6 +4684,7 @@ export async function runCli(argv, io = { out: console.log }) {
       constraints: parseConstraints(planMarkdown),
       caveman: resolved.caveman,
       effort: resolved.agents.implementer.effort ?? '',
+      batchSize: resolved.batchSize,
     })
     if (flags.out === undefined) {
       io.out(src)
@@ -4671,7 +4705,13 @@ export async function runCli(argv, io = { out: console.log }) {
       return 4
     }
     io.out(printable(outPath))
-    io.out(`workflow for run ${printable(runId)}, phase ${phase}: ${phaseTasks.length} task${phaseTasks.length === 1 ? '' : 's'}`)
+    // The batches are named only when the phase is batched, so the orchestrator can brief the same
+    // batches on the direct-Agent path; an unbatched phase prints the line it always did.
+    const batches = batchTasks(phaseTasks, resolved.batchSize)
+    const batched = batches.some((b) => b.length > 1)
+      ? ` in ${batches.length} batch${batches.length === 1 ? '' : 'es'}: ${batches.map((b) => b.map((t) => printable(t.id)).join('+')).join(', ')}`
+      : ''
+    io.out(`workflow for run ${printable(runId)}, phase ${phase}: ${phaseTasks.length} task${phaseTasks.length === 1 ? '' : 's'}${batched}`)
     return 0
   }
 
@@ -7900,6 +7940,7 @@ export async function runCli(argv, io = { out: console.log }) {
         const { resolved, sources } = await loadValidatedConfig(root)
         io.out(`maxParallel  ${resolved.maxParallel}  (${sources.maxParallel})`)
         io.out(`caveman      ${resolved.caveman}  (${sources.caveman})`)
+        io.out(`batchSize    ${resolved.batchSize}  (${sources.batchSize})`)
         for (const role of ROLES) {
           const entry = resolved.agents[role]
           // Provenance is per FIELD, not per role: a role whose tier comes from the tracked

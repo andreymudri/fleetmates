@@ -2237,7 +2237,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 154, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 157, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2437,16 +2437,23 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **174 lines: 154 in `cli.mjs`, 7 in
+// can no longer drift away from the code unnoticed. It came to **177 lines: 157 in `cli.mjs`, 7 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **3 sites in `cli.mjs`**, `workflow --out`: the cannot-write refusal (the
+// The most recent move was **3 sites in `cli.mjs`**, batched implementers: `brief`'s refusal of a
+// `--task` named twice (the id, argv), its refusal of a batch mixing tiers or phases (each id and
+// its tier or phase, argv and plan.json), and `workflow --out`'s summary naming the batches (each
+// task id, plan.json). `brief`'s unknown-task line was already a site and only moved. Driven by
+// "brief refuses a batch that names a task twice, mixes tiers or spans phases" and "workflow
+// batches a phase by the configured batchSize, and batchSize 1 restores one teammate per task".
+//
+// The move before that was **3 sites in `cli.mjs`**, `workflow --out`: the cannot-write refusal (the
 // resolved `--out` path, argv, and the fs error that quotes it), the path line it prints instead of
 // the source, and the summary line (the `--run` id). Driven by "workflow --out writes the generated
 // source to the file and prints only its path and a summary line" and its refusal sibling, which
 // pin the lines' shape rather than the wrapping.
 //
-// The move before that was **6 sites in `cli.mjs`**, the run fix route (`fix --phase run` and
+// The one before that was **6 sites in `cli.mjs`**, the run fix route (`fix --phase run` and
 // `record-fix-round --phase run`). `fix`: the missing-run-marker refusal and the run-verdict
 // mismatch refusal (the `--verdict` path and the `--phase` value, argv), the cannot-read-the-run-
 // tip line (a git error), the `cutFrom` stamp (the run branch name, which whoever created the
@@ -16353,5 +16360,140 @@ test('finish refuses a run fix branch behind a gap in the fix numbering', async 
     const code = await finishWith(repo.root, repo.io, RUN_REVIEW_PASS)
     assert.match(repo.lines.join('\n'), /^ {2}phase 1 {3}FAIL {3}failed: ownership/m)
     assert.equal(code, 1)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Batched implementers (docs/specs/2026-11-06-cost-cuts-design.md, section 5).
+// ---------------------------------------------------------------------------------------------
+
+const BATCH_PLAN = `### Task 1: A
+
+**Model:** cheap
+
+**Files:**
+- Create: \`a.mjs\`
+
+### Task 2: B
+
+**Model:** cheap
+
+**Files:**
+- Create: \`b.mjs\`
+
+### Task 3: C
+
+**Model:** capable
+
+**Files:**
+- Create: \`c.mjs\`
+
+### Task 4: D
+
+**Model:** cheap
+
+**Files:**
+- Create: \`d.mjs\`
+
+### Task 5: E
+
+**Model:** cheap
+
+**Files:**
+- Create: \`e.mjs\`
+
+**Depends:** T1
+`
+
+// A run over BATCH_PLAN, committed on main and fast-forwarded in so the plan is in the anchor.
+async function withBatchRun(fn) {
+  await withRepo(async (ctx) => {
+    const { root, io, lines, git: g } = ctx
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(path.join(root, 'batch.md'), BATCH_PLAN, 'utf8')
+    g(['add', 'batch.md'])
+    g(['commit', '--quiet', '-m', 'batch plan'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', '--ff-only', 'main'])
+    assert.equal(await runCli(['init-run', path.join(root, 'batch.md'), '--run', 'r1', '--root', root], io), 0, lines.join('\n'))
+    lines.length = 0
+    await fn(ctx)
+  })
+}
+
+const briefArgs = (root, ...tasks) => ['brief', '--run', 'r1', ...tasks.flatMap((t) => ['--task', t]), '--plan', 'batch.md', '--base', 'main', '--root', root]
+
+test('brief with repeated --task prints one batch brief, the same text composeBatchBrief renders', async () => {
+  const { composeBatchBrief } = await import('../scripts/brief.mjs')
+  await withBatchRun(async ({ root, io, lines }) => {
+    assert.equal(await runCli(briefArgs(root, 'T1', 'T2', 'T4'), io), 0, lines.join('\n'))
+    const tasks = [['T1', 'A', 'a.mjs'], ['T2', 'B', 'b.mjs'], ['T4', 'D', 'd.mjs']]
+    const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
+    const expected = composeBatchBrief({
+      tasks: tasks.map(([id]) => ({ ...plan.tasks.find((t) => t.id === id), branch: `fleetmates/r1/${id}` })),
+      runId: 'r1', planPath: 'batch.md', baseBranch: 'main', constraints: [],
+    })
+    assert.deepEqual(lines, [expected])
+    for (const [id, , file] of tasks) {
+      assert.match(lines[0], new RegExp(`git checkout -B fleetmates/r1/${id} main`))
+      assert.match(lines[0], new RegExp(`ONLY these files: ${file.replace('.', '\\.')}`))
+    }
+  })
+})
+
+test('brief with a single --task still prints the single-task brief', async () => {
+  const { composeBrief } = await import('../scripts/brief.mjs')
+  await withBatchRun(async ({ root, io, lines }) => {
+    assert.equal(await runCli(briefArgs(root, 'T1'), io), 0, lines.join('\n'))
+    const plan = JSON.parse(await readFile(path.join(root, '.fleetmates', 'r1', 'plan.json'), 'utf8'))
+    const task = { ...plan.tasks.find((t) => t.id === 'T1'), branch: 'fleetmates/r1/T1' }
+    assert.deepEqual(lines, [composeBrief({ task, runId: 'r1', planPath: 'batch.md', baseBranch: 'main', constraints: [] })])
+  })
+})
+
+test('brief refuses a batch that names a task twice, mixes tiers or spans phases', async () => {
+  await withBatchRun(async ({ root, io, lines }) => {
+    assert.equal(await runCli(briefArgs(root, 'T1', 'T2', 'T1'), io), 2)
+    assert.deepEqual(lines, ['--task names T1 more than once'])
+    lines.length = 0
+    assert.equal(await runCli(briefArgs(root, 'T1', 'T3'), io), 2)
+    assert.deepEqual(lines, ['--task names tasks of different tiers (T1 cheap, T3 capable); a batch runs on one model'])
+    lines.length = 0
+    assert.equal(await runCli(briefArgs(root, 'T1', 'T5'), io), 2)
+    assert.deepEqual(lines, ['--task names tasks of different phases (T1 phase 1, T5 phase 2); a batch belongs to one phase'])
+    lines.length = 0
+    assert.equal(await runCli(briefArgs(root, 'T1', 'T9'), io), 4)
+    assert.deepEqual(lines, ['no task T9 in run r1'])
+  })
+})
+
+test('workflow batches a phase by the configured batchSize, and batchSize 1 restores one teammate per task', async () => {
+  await withBatchRun(async ({ root, io, lines }) => {
+    const out = path.join(root, 'wf.mjs')
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--plan', 'batch.md', '--base', 'main', '--root', root, '--out', out], io), 0, lines.join('\n'))
+    assert.deepEqual(lines, [out, 'workflow for run r1, phase 1: 4 tasks in 2 batches: T1+T2+T4, T3'])
+    assert.match(await readFile(out, 'utf8'), /const BATCHES = /)
+
+    lines.length = 0
+    assert.equal(await runCli(['config', 'set', 'batchSize', '1', '--local', '--root', root], io), 0, lines.join('\n'))
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--plan', 'batch.md', '--base', 'main', '--root', root, '--out', out], io), 0, lines.join('\n'))
+    assert.deepEqual(lines, [out, 'workflow for run r1, phase 1: 4 tasks'])
+    assert.doesNotMatch(await readFile(out, 'utf8'), /const BATCHES = /)
+  })
+})
+
+test('config set refuses a batchSize below 1, and config list reports it', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    assert.equal(await runCli(['config', 'list', '--root', root], io), 0)
+    assert.match(lines.join('\n'), /^batchSize\s+3\s+\(default\)$/m)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'set', 'batchSize', '0', '--local', '--root', root], io), 2)
+    assert.match(lines.join('\n'), /batchSize must be an integer >= 1/)
+    lines.length = 0
+    assert.equal(await runCli(['config', 'set', 'batchSize', '2', '--local', '--root', root], io), 0, lines.join('\n'))
+    lines.length = 0
+    assert.equal(await runCli(['config', 'get', 'batchSize', '--root', root], io), 0)
+    assert.match(lines.join('\n'), /^2$/m)
   })
 })
