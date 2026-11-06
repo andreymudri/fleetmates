@@ -16007,6 +16007,27 @@ test('finish skips the run entry\'s test inventory instead of re-running the sui
   })
 })
 
+// Run-scoped review moved the agent check off the phase gates, so a manifest whose `default` block
+// declares a command check and an agent check under one name (`review`) now gives the phase gates
+// no duplicate and the run entry two. A supplied result for that name cannot say which of the two it
+// answers, which is why a phase gate refused it before the move; the run entry refuses it the same
+// way, through the same `validateSuppliedResults`, before any check runs.
+test('finish refuses a supplied result for a name the run entry declares twice, naming it', async () => {
+  await withRepo(async (repo) => {
+    await runScopedRun(repo, [
+      { name: 'review', kind: 'command', run: 'node -e "process.exit(0)"' },
+      { name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'run' },
+    ])
+    repo.lines.length = 0
+    const code = await finishWith(repo.root, repo.io, { phases: { run: { results: [{ name: 'review', kind: 'agent', status: 'pass', findings: [] }] } } })
+    const out = repo.lines.join('\n')
+    assert.equal(code, 2, out)
+    assert.match(out, /^run: --results names a check declared more than once in this phase's manifest: "review"$/m)
+    assert.doesNotMatch(out, /PASS/)
+    assert.doesNotMatch(out, /^finish: running/m, 'refused before any check runs')
+  })
+})
+
 // --- review-dispatch and collect-reviews for the run (cost-cuts spec, section 2) ---------------
 // The run review judges the integrated diff merge-base(base, runBranch)..runBranch once. Its stamp
 // names the run tip, so any later commit on the run branch makes the findings stale.
