@@ -32,6 +32,9 @@ export const ENFORCEMENT_KEYS = ['phases', 'lens', 'preview', 'protected', 'skip
 
 export class ConfigError extends Error {}
 
+// Tasks per implementer when nothing is configured. 1 restores one teammate per task.
+export const DEFAULT_BATCH_SIZE = 3
+
 // A dotted key is caller-supplied. These three segments reach Object.prototype rather than the
 // config object, so a write through them silently no-ops the file and pollutes every object in
 // the process instead. Rejected by name at the boundary rather than defended against per walk.
@@ -49,6 +52,12 @@ export function assertSafeKey(dotted) {
 const VALIDATORS = {
   maxParallel: (v) => {
     if (!Number.isInteger(v) || v < 1) throw new ConfigError('maxParallel must be an integer >= 1')
+    return v
+  },
+  // How many same-tier tasks one implementer does in sequence (scripts/workflow-gen.mjs,
+  // `batchTasks`). Ergonomics: every task still lands on its own branch, so no verdict reads it.
+  batchSize: (v) => {
+    if (!Number.isInteger(v) || v < 1) throw new ConfigError('batchSize must be an integer >= 1')
     return v
   },
   caveman: (v) => {
@@ -301,11 +310,12 @@ export function validateLocal(local) {
         `${key} is an enforcement key; it may only be set in ${GATE_FILE}`,
       )
     }
-    if (!['maxParallel', 'caveman', 'agents', 'harnesses', 'watch', 'ci'].includes(key)) {
+    if (!['maxParallel', 'batchSize', 'caveman', 'agents', 'harnesses', 'watch', 'ci'].includes(key)) {
       throw new ConfigError(`unknown key in ${LOCAL_FILE}: ${key}`)
     }
   }
   if (local.maxParallel !== undefined) VALIDATORS.maxParallel(local.maxParallel)
+  if (local.batchSize !== undefined) VALIDATORS.batchSize(local.batchSize)
   if (local.caveman !== undefined) VALIDATORS.caveman(local.caveman)
   if (local.agents !== undefined) {
     if (local.agents === null || typeof local.agents !== 'object' || Array.isArray(local.agents)) {
@@ -346,6 +356,7 @@ export function validateGate(gate) {
     throw new ConfigError(`${GATE_FILE} must contain a JSON object`)
   }
   if (gate.maxParallel !== undefined) VALIDATORS.maxParallel(gate.maxParallel)
+  if (gate.batchSize !== undefined) VALIDATORS.batchSize(gate.batchSize)
   if (gate.caveman !== undefined) VALIDATORS.caveman(gate.caveman)
   if (gate.agents !== undefined) {
     if (gate.agents === null || typeof gate.agents !== 'object' || Array.isArray(gate.agents)) {
@@ -451,6 +462,7 @@ export async function loadConfig(root) {
     gate,
     resolved: {
       maxParallel: pick('maxParallel', defaultMaxParallel()),
+      batchSize: pick('batchSize', DEFAULT_BATCH_SIZE),
       caveman: pick('caveman', false),
       agents,
       harnesses,
@@ -506,6 +518,7 @@ export function unsetKey(obj, dotted) {
 export function validateKey(dotted, value) {
   assertSafeKey(dotted)
   if (dotted === 'maxParallel') return VALIDATORS.maxParallel(value)
+  if (dotted === 'batchSize') return VALIDATORS.batchSize(value)
   if (dotted === 'caveman') return VALIDATORS.caveman(value)
   const watchMatch = /^watch\.([A-Za-z]+)$/.exec(dotted)
   if (watchMatch) { validateWatch({ [watchMatch[1]]: value }, LOCAL_FILE); return value }

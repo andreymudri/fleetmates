@@ -1283,3 +1283,46 @@ test('validateKey refuses watch.spinFailures below 2', () => {
   assert.equal(validateKey('watch.spinFailures', 3), 3)
   assert.throws(() => validateKey('watch.spinFailures', 1), (err) => err instanceof ConfigError && err.message.includes('watch.spinFailures must be'))
 })
+
+// Batched implementers (docs/specs/2026-11-06-cost-cuts-design.md, section 5): an ergonomics key,
+// validated like maxParallel, defaulting to 3, and allowed in the local layer because the gate
+// does not depend on it.
+test('batchSize accepts an integer >= 1 and rejects everything else', () => {
+  assert.equal(validateKey('batchSize', 1), 1)
+  assert.equal(validateKey('batchSize', 5), 5)
+  for (const bad of [0, -1, 1.5, '3', null, true]) {
+    assert.throws(
+      () => validateKey('batchSize', bad),
+      (err) => err instanceof ConfigError && err.message === 'batchSize must be an integer >= 1',
+      `expected ${JSON.stringify(bad)} to be refused as a batchSize`,
+    )
+  }
+})
+
+test('batchSize defaults to 3 and is an ergonomics key, not an enforcement one', async () => {
+  assert.equal(isEnforcementKey('batchSize'), false)
+  await withTempRoot(async (root) => {
+    const { resolved, sources } = await loadConfig(root)
+    assert.equal(resolved.batchSize, 3)
+    assert.equal(sources.batchSize, 'default')
+  })
+})
+
+test('batchSize resolves from the local layer over the gate manifest', async () => {
+  await withTempRoot(async (root) => {
+    await writeJson(root, GATE_FILE, { batchSize: 2 })
+    let { resolved, sources } = await loadConfig(root)
+    assert.equal(resolved.batchSize, 2)
+    assert.equal(sources.batchSize, GATE_FILE)
+    await writeJson(root, LOCAL_FILE, { batchSize: 1 })
+    ;({ resolved, sources } = await loadConfig(root))
+    assert.equal(resolved.batchSize, 1)
+    assert.equal(sources.batchSize, LOCAL_FILE)
+  })
+})
+
+test('a bad batchSize is refused in either layer', async () => {
+  assert.throws(() => validateLocal({ batchSize: 0 }), (err) => err instanceof ConfigError && err.message === 'batchSize must be an integer >= 1')
+  assert.equal(validateLocal({ batchSize: 4 }).batchSize, 4)
+  assert.throws(() => validateGate({ batchSize: 'three' }), (err) => err instanceof ConfigError && err.message === 'batchSize must be an integer >= 1')
+})
