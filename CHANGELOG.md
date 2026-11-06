@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+An A/B eval on 5 FeatureBench tasks found the same quality with and without the plugin, while the
+fleet arm cost 5x to 12x as much; the orchestrator was about 30% of the fleet's cost and the
+reviewers about 17%. The changes below cut those two shares.
+
+### Changed
+
+- Review runs once per run by default. An `agent` check gains `scope`: `"run"` (the default when
+  it is absent) or `"phase"`, validated in the tracked manifest only. A run-scoped review leaves
+  the phase gates, and `finish` computes one more entry, `run`, after the numbered phases: the
+  command checks, the run-scoped reviews and `fileset-run`, or `phases.run.checks` when declared.
+  Its results arrive through `finish --results` under the key `run`, and a pending review there
+  still fails the run. `"scope": "phase"` keeps a review in every phase gate. Existing manifests
+  whose review has no `scope` move to run review; the inferred manifest writes `"scope": "run"`.
+- `parallel-execution` and `phase-gate` are split into a core of at most 8 KB and `reference/`
+  files the core names, read when the situation in its table comes up. The tests read each skill
+  as one corpus, `SKILL.md` then `reference/*.md` in name order, through one shared reader, so a
+  pinned sentence stays pinned wherever it lands.
+- The watchdog's phase-idle exit prints nothing and exits 0; it still reports a stalled or orphaned
+  teammate and a watch error. The skills say not to start it on the Workflow path, whose completion
+  notification already wakes the orchestrator.
+
+### Added
+
+- `review-dispatch --phase run` and `collect-reviews --phase run` review the integrated diff
+  `merge-base(base, run branch)..run branch`, stamped with the run branch tip, so any later commit
+  on the run branch makes the findings stale.
+- `fix --phase run` and `record-fix-round --phase run`: on `retry`, one `fix-<n>` task on
+  `fleetmates/<run>/fix-<n>`, cut from the run tip, with the blocking findings and the cited paths
+  some plan task declares, at most 2 rounds and then `escalate`. A finding citing only undeclared
+  paths escalates at once, and only review findings are routable.
+- `ownership` admits `fleetmates/<run>/fix-<n>` branches cut after the whole plan was integrated.
+  Limit: a fix branch may change any path the plan declares, not only the files `fix` emitted,
+  because that list is run state and no check reads it.
+- `fileset-run`, a computed check of the run entry: every path changed on the run is declared by
+  some task of the anchored plan, and a protected path only where a plan line marks it
+  `(protected)`. It reads git and the anchored plan only.
+- The Workflow profile emits `review-run` and `collect-run` before `finish` for a run-scoped
+  review, and the controller builds the `run` entry of its finish results. Limit: on a run fix
+  retry the controller stops with `run-fix-required` instead of running the round, and the fix
+  route continues by hand.
+- `workflow --out <file>` writes the generated script to the file and prints only its path and a
+  one-line summary.
+- A self-inspection rule in the `parallel-execution` core: the orchestrator does not review diffs
+  or re-run the suites the gate runs, except to investigate a FAIL verdict or a merge conflict.
+- A plan check before execution in `parallel-execution`, `executing-plans` and `writing-plans`:
+  the Out of Scope section excludes nothing the task statement requires, and every dependency
+  exists. It is prose guidance, not enforced.
+
 ## v2.8.0
 
 ### Added
