@@ -118,7 +118,7 @@ async function collectWith({ phase, lens }) {
   try {
     const config = {
       lens: [lens],
-      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'] }] } },
+      phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase', blockOn: ['high'] }] } },
     }
     await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify(config), 'utf8')
     const lines = []
@@ -780,4 +780,39 @@ test('the shared component rule accepts and refuses by what a component resolves
   for (const bad of ['', '.', '..', '.. ', '. ', '...', '   ', '..\t', '.  .', 'a/b']) {
     assert.equal(isUnsafePathComponent(bad), true, `${JSON.stringify(bad)} must be refused`)
   }
+})
+
+// --- the run review (docs/specs/2026-11-06-cost-cuts-design.md, section 2) ----------------------
+// The run review judges one tree, the run tip, so its stamp names that tip under `tips` rather than
+// a list of task branches under `branches`. Any later commit on the run branch makes it stale.
+
+test('a run stamp names the run tip under tips, and carries no branches key', () => {
+  const s = reviewStamp({ phase: 'run', lens: 'tests', tips: ['run-branch@ccc'] })
+  assert.deepEqual(s, { phase: 'run', lens: 'tests', tips: ['run-branch@ccc'] })
+})
+
+test('a run stamp is current only while the run tip is the one it judged', () => {
+  const expected = { phase: 'run', lens: 'tests', tips: ['run-branch@ccc'] }
+  assert.equal(reviewStale({ stamp: { ...expected } }, expected), null)
+  const why = reviewStale({ stamp: { ...expected, tips: ['run-branch@aaa'] } }, expected)
+  assert.match(why, /run-branch@aaa/)
+  assert.match(why, /run-branch@ccc/)
+})
+
+// A stamp shaped for a phase (branches, no tips) must not satisfy the run, even when it is
+// relabelled `run`: it names task branches, not the integrated tree the run review is about.
+test('a run expectation refuses a stamp that names branches instead of the run tip', () => {
+  const why = reviewStale(
+    { stamp: { phase: 'run', lens: 'tests', branches: ['run-branch@ccc'] } },
+    { phase: 'run', lens: 'tests', tips: ['run-branch@ccc'] },
+  )
+  assert.match(why, /judged/)
+})
+
+test('a run stale reason cannot carry an escape sequence out of the tips it quotes', () => {
+  const why = reviewStale(
+    { stamp: { phase: 'run', lens: 'tests', tips: [`run-branch@aaa${FORGERY}`] } },
+    { phase: 'run', lens: 'tests', tips: ['run-branch@ccc'] },
+  )
+  assertNoEscapeBytes(why)
 })

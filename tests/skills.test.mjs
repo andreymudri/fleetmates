@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile, readdir } from 'node:fs/promises'
-import { assertClaim, assertStatement, parseDoc } from './md-contract.mjs'
+import { assertClaim, assertStatement, parseDoc, readSkill } from './md-contract.mjs'
 import { STALL_HINT, renderLiveness } from '../scripts/liveness.mjs'
 
 const dir = new URL('../skills/', import.meta.url)
@@ -14,14 +14,11 @@ async function allSkills() {
     .sort()
 }
 
-async function skill(name) {
-  const text = await readFile(new URL(`${name}/SKILL.md`, dir), 'utf8')
-  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
-  assert.ok(match, `${name} has no frontmatter`)
-  const fields = Object.fromEntries(
-    match[1].split(/\r?\n/).map((l) => [l.slice(0, l.indexOf(':')).trim(), l.slice(l.indexOf(':') + 1).trim()]),
-  )
-  return { fields, body: text.slice(match[0].length) }
+// The shared corpus reader: SKILL.md followed by reference/*.md in name order, so every scan over
+// `body` below — the cross-skill ones included — covers a skill's reference files as well.
+async function skill(name, options) {
+  const { fields, body, doc } = await readSkill(name, options)
+  return { fields, body, doc }
 }
 
 test('every required fleet skill is present', async () => {
@@ -211,29 +208,34 @@ test('stripComments removes a markdown comment, so a commented instruction canno
   assert.equal(stripComments('<!--\n`resume`\n-->\n'), '\n')
 })
 
-test('parallel-execution starts the watchdog under Monitor in its own section between sections 2 and 3', async () => {
-  const { body } = await skill('parallel-execution')
-  const doc = parseDoc(stripComments(body), 'parallel-execution')
+// The watchdog is part of every direct-Agent run, so it lives in the core every run reads, right
+// after the dispatch step, and not in a reference file read on demand. The full dispatch rules moved
+// to reference/init-and-dispatch.md, and neither dispatch section carries the watch command.
+test('parallel-execution starts the watchdog under Monitor in its own core section, right after dispatch', async () => {
+  const { doc } = await skill('parallel-execution', { transform: stripComments })
   const watch = doc.section(/^Watch the phase$/)
   assert.equal(watch.level, 2, 'Watch the phase must be a top-level section')
+  assert.equal(watch.label, 'parallel-execution/SKILL.md § Watch the phase', 'Watch the phase must be in the core, not a reference file')
   const top = doc.sections.filter((s) => s.level === 2).map((s) => s.title)
   const at = top.indexOf('Watch the phase')
-  assert.equal(top[at - 1], '2. Dispatch the phase', 'Watch the phase must come right after section 2')
-  assert.match(top[at + 1] ?? '', /^3\. /, 'Watch the phase must come right before section 3')
+  assert.equal(top[at - 1], 'Dispatch a phase', 'Watch the phase must come right after the core dispatch step')
+  assert.equal(top[at + 1], 'After a phase returns', 'Watch the phase must come right before the step that records results')
   assert.ok(
     watch.code.some((b) => b.code.includes('cli.mjs" watch --run')),
     'Watch the phase must carry a cli.mjs watch --run command block',
   )
   assertStatement(watch, /\bMonitor\b/, 'Watch the phase must tell the orchestrator to run watch with Monitor')
-  // Section 2 is locked by tests/skill-contracts.test.mjs, so the watchdog stays out of it.
-  const dispatch = doc.section(/^2\. Dispatch the phase$/)
-  assert.ok(!rawOf(dispatch).includes('cli.mjs" watch --run'), 'section 2 must not carry the watch command')
-  assert.ok(!/\bMonitor\b/.test(rawOf(dispatch)), 'section 2 must not name Monitor')
+  // The full dispatch section is locked by tests/skill-contracts.test.mjs, so the watchdog stays out
+  // of it, and out of the core's dispatch step too.
+  for (const matcher of [/^Dispatch a phase$/, /^2\. Dispatch the phase$/]) {
+    const dispatch = doc.section(matcher)
+    assert.ok(!rawOf(dispatch).includes('cli.mjs" watch --run'), `${dispatch.label} must not carry the watch command`)
+    assert.ok(!/\bMonitor\b/.test(rawOf(dispatch)), `${dispatch.label} must not name Monitor`)
+  }
 })
 
 test('fleet-supervision documents the watchdog events and the commands each response runs', async () => {
-  const { body } = await skill('fleet-supervision')
-  const doc = parseDoc(stripComments(body), 'fleet-supervision')
+  const { doc } = await skill('fleet-supervision', { transform: stripComments })
   const watchdog = doc.section(/^The watchdog$/)
   const raw = rawOf(watchdog)
   for (const event of ['start', 'resume', 'respawn', 'orphan', 'unmeasured', 'watch-error', 'exit']) {

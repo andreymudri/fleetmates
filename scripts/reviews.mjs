@@ -143,7 +143,12 @@ export function reviewFileName(phase, lens) {
 // the stamp existed — but the stamp must not be read as closing that gap. Nothing short of the
 // orchestrator computing the diff itself and handing the reviewer a digest it cannot derive would
 // close it.
-export function reviewStamp({ phase, lens, branchShas = {} }) {
+//
+// The run review (`--phase run`) judges one tree, the run tip, not a set of task branches: its
+// stamp names that tip as `<runBranch>@<sha>` under `tips`, and carries no `branches` key, so a
+// phase-shaped stamp relabelled `run` names nothing the run expectation accepts.
+export function reviewStamp({ phase, lens, branchShas = {}, tips = null }) {
+  if (Array.isArray(tips)) return { phase: String(phase), lens, tips: [...tips] }
   const names = Object.keys(branchShas).sort()
   return { phase: String(phase), lens, branches: names.map((n) => `${n}@${branchShas[n]}`) }
 }
@@ -163,6 +168,14 @@ export function reviewStale(file, expected) {
     return `the findings describe phase ${printable(stamp.phase)}, not phase ${expected.phase}`
   }
   if (stamp.lens !== expected.lens) return `the findings are for lens ${printable(stamp.lens)}, not ${expected.lens}`
+  // An expectation with `tips` is the run's: only the stamp's `tips` can match it, never its
+  // `branches`, and `printable` covers the expected side too, since a branch name is not ours.
+  if (Array.isArray(expected.tips)) {
+    const judged = (Array.isArray(stamp.tips) ? stamp.tips : []).join(' ')
+    const current = expected.tips.join(' ')
+    if (judged !== current) return `the findings judged ${printable(judged) || '(nothing)'}, but the run is at ${printable(current) || '(nothing)'}`
+    return null
+  }
   const a = (stamp.branches ?? []).join(' ')
   const b = (expected.branches ?? []).join(' ')
   if (a !== b) return `the findings judged ${printable(a) || '(nothing)'}, but this phase is at ${b || '(nothing)'}`

@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  dispatchPhase, fixedRefusal, DriverLockError,
+  dispatchPhase, fixedRefusal, DriverLockError, LIMIT_CONTINUE, LIMIT_SLACK_MS, LIMIT_BACKOFF_MS, MAX_LIMIT_WAITS,
   killProcess, waitForExit, releaseLock, runPool, acquireLock, pidAlive,
 } from '../scripts/driver.mjs'
 import { readEvents, ledgerSummary, fingerprint } from '../scripts/event-ledger.mjs'
@@ -684,4 +684,90 @@ test('an adapter without readError, or whose readError throws or says nothing, s
     assert.deepEqual(out.orphaned, ['T1'], name)
     assert.equal((await readSession(runDir, 'T1')).exitReason, 'no result', name)
   }
+})
+
+// A provider limit is waited out and the SAME session is continued, so the teammate keeps its work.
+// `sleep` is injected and records the delay, so the test proves both that the driver waited and how
+// long, without waiting.
+test('a retriable provider limit is waited out and the same session continues to a result', async () => {
+  const runDir = await tmpRunDir('limit-wait')
+  const results = [null, DONE]
+  const { adapter, calls, completeEnforcement } = makeStubAdapter({ result: () => results.shift() })
+  adapter.readError = async () => ({ type: 'provider.free-limit', message: 'limit', retriable: true, retryAfterMs: 5_000 })
+  const slept = []
+  const seen = []
+  const out = await dispatchPhase(baseArgs(runDir, {
+    runId: 'r-lw', adapter, completeEnforcement, limitWaitMinutes: 60,
+    sleep: async (ms) => { slept.push(ms); seen.push((await readSession(runDir, 'T1')).state) },
+  }))
+  assert.deepEqual(out.orphaned, [])
+  assert.equal(out.results[0].status, 'done')
+  assert.deepEqual(slept, [5_000 + LIMIT_SLACK_MS])
+  assert.deepEqual(seen, ['waiting-limit'], 'the session file says the task is waiting while it waits')
+  assert.equal(calls.resume.length, 1)
+  assert.equal(calls.resume[0].sessionId, 'sid-T1')
+  assert.equal(calls.resume[0].message, LIMIT_CONTINUE)
+  const session = await readSession(runDir, 'T1')
+  assert.equal(session.state, 'done')
+  assert.equal(session.resumeAt, undefined, 'a finished wait leaves no stale resume time behind')
+  assert.equal(session.limitWaits.length, 1)
+  assert.equal(session.limitWaits[0].type, 'provider.free-limit')
+})
+
+// The wait is refused whole when the reset is further away than the configured cap, and when the
+// cap is 0. Either way the task is orphaned with the old reason and nothing sleeps.
+test('a limit that resets past limitWaitMinutes, or with the wait off, orphans without waiting', async () => {
+  for (const [name, minutes, retryAfterMs] of [['past-cap', 1, 60_001 - LIMIT_SLACK_MS + 1], ['off', 0, 1_000]]) {
+    const runDir = await tmpRunDir(`limit-${name}`)
+    const { adapter, calls, completeEnforcement } = makeStubAdapter({ result: null })
+    adapter.readError = async () => ({ type: 'provider.free-limit', message: 'limit', retriable: true, retryAfterMs })
+    const slept = []
+    const out = await dispatchPhase(baseArgs(runDir, {
+      runId: `r-${name}`, adapter, completeEnforcement, limitWaitMinutes: minutes, sleep: async (ms) => { slept.push(ms) },
+    }))
+    assert.deepEqual(out.orphaned, ['T1'], name)
+    assert.deepEqual(slept, [], name)
+    assert.equal(calls.resume.length, 0, name)
+    assert.match((await readSession(runDir, 'T1')).exitReason, /^provider\.free-limit/, name)
+  }
+})
+
+// Exactly at the cap is allowed: the comparison is "more than the cap", so a reset the cap names
+// to the millisecond is still waited for.
+test('a limit that resets exactly at the cap is still waited for', async () => {
+  const runDir = await tmpRunDir('limit-at-cap')
+  const results = [null, DONE]
+  const { adapter, completeEnforcement } = makeStubAdapter({ result: () => results.shift() })
+  adapter.readError = async () => ({ type: 'provider.free-limit', retriable: true, retryAfterMs: 60_000 - LIMIT_SLACK_MS + 60_000 })
+  const slept = []
+  const out = await dispatchPhase(baseArgs(runDir, { runId: 'r-cap', adapter, completeEnforcement, limitWaitMinutes: 2, sleep: async (ms) => { slept.push(ms) } }))
+  assert.deepEqual(out.orphaned, [])
+  assert.deepEqual(slept, [120_000])
+})
+
+// A non-retriable error (an empty balance, a bad model id) is not waited for: waiting cannot fix it.
+test('a non-retriable provider error orphans at once', async () => {
+  const runDir = await tmpRunDir('limit-nonretriable')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter({ result: null })
+  adapter.readError = async () => ({ type: 'unknown', message: 'Insufficient Balance', retriable: false, retryAfterMs: null })
+  const slept = []
+  const out = await dispatchPhase(baseArgs(runDir, { runId: 'r-nr', adapter, completeEnforcement, sleep: async (ms) => { slept.push(ms) } }))
+  assert.deepEqual(out.orphaned, ['T1'])
+  assert.deepEqual(slept, [])
+  assert.equal(calls.resume.length, 0)
+  assert.equal((await readSession(runDir, 'T1')).exitReason, 'unknown: Insufficient Balance')
+})
+
+// With no reset named, the waits back off, and they stop after MAX_LIMIT_WAITS tries.
+test('with no reset time named the waits back off and stop after the last allowed try', async () => {
+  const runDir = await tmpRunDir('limit-backoff')
+  const { adapter, calls, completeEnforcement } = makeStubAdapter({ result: null })
+  adapter.readError = async () => ({ type: 'provider.no-route', message: 'no route', retriable: true, retryAfterMs: null })
+  const slept = []
+  const out = await dispatchPhase(baseArgs(runDir, { runId: 'r-bo', adapter, completeEnforcement, limitWaitMinutes: 60, sleep: async (ms) => { slept.push(ms) } }))
+  assert.deepEqual(out.orphaned, ['T1'])
+  assert.equal(MAX_LIMIT_WAITS, 3)
+  assert.deepEqual(slept, [LIMIT_BACKOFF_MS, LIMIT_BACKOFF_MS * 2, LIMIT_BACKOFF_MS * 4])
+  assert.equal(calls.resume.length, MAX_LIMIT_WAITS)
+  assert.equal((await readSession(runDir, 'T1')).limitWaits.length, MAX_LIMIT_WAITS)
 })

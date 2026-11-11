@@ -23,11 +23,18 @@ test('the npm package is fleetmates at the plugin manifest version', () => {
 
 test('the package carries the plugin and nothing that only develops it', () => {
   const paths = packed().files.map((f) => f.path)
-  for (const required of ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/session-start', 'hooks/update-check', 'hooks/run-hook.cmd', 'scripts/cli.mjs', 'templates/phase-workflow.js', 'LICENSE', 'NOTICE.md']) {
+  for (const required of ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/session-start', 'hooks/update-check', 'hooks/run-hook.cmd', 'scripts/cli.mjs', 'templates/phase-workflow.js', 'templates/phase-workflow-batched.js', 'LICENSE', 'NOTICE.md']) {
     assert.ok(paths.includes(required), `package is missing ${required}`)
   }
   const skills = readdirSync(new URL('../skills/', import.meta.url), { withFileTypes: true }).filter((e) => e.isDirectory())
   for (const skill of skills) assert.ok(paths.includes(`skills/${skill.name}/SKILL.md`), `package is missing skills/${skill.name}/SKILL.md`)
+  // A skill's core points at its reference files, so a package without them ships a core whose
+  // table names files that are not there.
+  for (const skill of skills) {
+    let refs = []
+    try { refs = readdirSync(new URL(`../skills/${skill.name}/reference/`, import.meta.url)) } catch (error) { if (error.code !== 'ENOENT') throw error }
+    for (const ref of refs) assert.ok(paths.includes(`skills/${skill.name}/reference/${ref}`), `package is missing skills/${skill.name}/reference/${ref}`)
+  }
   // tools/ holds operator replay tooling and its recorded data, which must never ship.
   assert.deepEqual(paths.filter((p) => ['tests/', 'docs/', '.github/', 'tools/'].some((dir) => p.startsWith(dir))), [])
 })
