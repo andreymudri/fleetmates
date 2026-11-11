@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Installing or updating the plugin no longer fails with `EALLOWREMOTE` on npm 12, whose default
+  refuses a package fetched by tarball URL. The marketplace now installs from the `directory`
+  branch of this repository over git instead of from npm. That branch holds the same files the npm
+  package ships and is refreshed by each release. Measured on Claude Code 2.1.322 and Codex CLI
+  0.167.1; Codex does not accept the `github` source type, so the entry uses `url` with a `ref`.
+
 ## v2.9.1
 
 ### Changed

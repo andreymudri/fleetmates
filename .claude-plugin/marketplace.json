@@ -8,8 +8,9 @@
     {
       "name": "fleetmates",
       "source": {
-        "source": "npm",
-        "package": "fleetmates"
+        "source": "url",
+        "url": "https://github.com/andreymudri/fleetmates.git",
+        "ref": "directory"
       },
       "description": "Runs a written plan across background teammates, each in its own git worktree, with an automated gate between phases: brainstorming, planning, TDD, debugging, parallel execution, and supervision."
     }
