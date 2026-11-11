@@ -163,7 +163,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|platform-sim|flaky|ci-wait|ci-local|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
@@ -195,6 +195,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
   map-notes --run <id> [--root <path>] [--write <path>]
   usage    [--session <id>] [--json] [--root <path>]
+  retro    --run <id> [--date <YYYY-MM-DD>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--plan <path>] [--base <branch>] [--root <path>]
@@ -551,6 +552,7 @@ export const REQUIRED = {
   map: [],
   // Belongs to no run either: the transcript store is keyed by session, not by run id.
   usage: [],
+  retro: ['run'],
   'map-notes': ['run'],
   digest: ['run'],
   diagram: ['run'],
@@ -650,6 +652,7 @@ export const KNOWN_FLAGS = {
   // `--run` reads a headless run's session store (`.fleetmates/<run>/sessions/*.json`); without
   // it `usage` still reads the Claude Code transcript store keyed by session.
   usage: ['session', 'json', 'run'],
+  retro: ['run', 'date', 'json'],
   'map-notes': ['run', 'write'],
   config: ['local'],
   'platform-sim': [],
@@ -6248,6 +6251,52 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(printable(err.message))
       return 1
     }
+  }
+
+  if (command === 'retro') {
+    // Proposals only: nothing is written. See scripts/retro.mjs for why its input is not evidence.
+    const date = typeof flags.date === 'string' ? flags.date : new Date().toISOString().slice(0, 10)
+    let plan, status
+    try {
+      plan = await readState(root, runId, 'plan')
+      status = await readState(root, runId, 'status')
+    } catch (err) {
+      io.out(`cannot read the state of run ${printable(String(runId))}: ${printable(err.message)}`)
+      return 2
+    }
+    if (!plan && !status) {
+      io.out(`no run ${printable(String(runId))} under ${NAMES.stateDir}/ (run init-run first)`)
+      return 2
+    }
+    // A headless run's per-task records. Absent for a Claude Code run, which is fine.
+    const sessions = []
+    const sessionsDir = path.join(runDir(root, runId), 'sessions')
+    let names = []
+    try { names = await readdir(sessionsDir) } catch { names = [] }
+    for (const name of names.filter((f) => f.endsWith('.json') && !f.endsWith('.schema.json') && !f.endsWith('.result.json')).sort()) {
+      try { sessions.push(JSON.parse(await readFile(path.join(sessionsDir, name), 'utf8'))) } catch { /* a torn record says nothing usable */ }
+    }
+    const { draftRetro } = await import('./retro.mjs')
+    let retro
+    try {
+      retro = draftRetro({ runId, date, plan, status, sessions })
+    } catch (err) {
+      io.out(printable(err.message))
+      return 2
+    }
+    if (flags.json === true) {
+      io.out(printableBlock(JSON.stringify({ runId, date, findings: retro.findings }, null, 2)))
+    } else if (retro.findings.length === 0) {
+      io.out(`run ${printable(String(runId))}: no fix rounds, failing gates, orphaned teammates or limit waits recorded; nothing to propose`)
+    } else {
+      io.out([
+        `run ${printable(String(runId))}: ${retro.findings.length} proposed learning(s). Nothing was written.`,
+        `Edit each Lesson line, then paste the entries worth keeping into fleetmates.learnings.md.`,
+        '',
+        retro.markdown,
+      ].join('\n'))
+    }
+    return 0
   }
 
   if (command === 'map') {

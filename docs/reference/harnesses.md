@@ -33,6 +33,27 @@ In `files` mode the teammate has no repository of its own, so:
 - a change to `.cursor/*.json`, `.cursor/hooks/`, `.claude/settings*.json` or `.vscode/` is refused
   (the task is orphaned, naming the paths) rather than dropped.
 
+## Provider limits
+
+When a headless teammate's turn ends on a provider limit, the driver waits it out and continues the
+same session, so the teammate keeps what it had done. It waits only when the harness names the
+error and marks it retriable; today that is OpenCode (`provider.free-limit` and
+`provider.no-route`). Codex and Cursor do not report why a turn failed, so their teammates are
+orphaned as before.
+
+- The wait is the reset time the provider names plus one minute. With no reset time named, it is
+  1, then 2, then 4 minutes, and the task is given up after three waits.
+- `harnesses.<name>.limitWaitMinutes` caps one wait (default `60`, `0` turns waiting off). A reset
+  further away than the cap is not waited for at all: the task is orphaned with the provider's
+  reason, which names the reset time.
+- While it waits, the task's session record has `state: "waiting-limit"` and `resumeAt`, and each
+  wait is kept in `limitWaits`. `retro` lists them.
+- An empty balance or a spend limit is not retriable, because waiting does not fix it.
+- It does not cover Claude Code subagents: when Claude Code itself hits a limit, the whole session
+  stops, and you continue it from Claude Code.
+- It applies to an implementer's first turn, not to the enforcement resume that follows a rejected
+  `complete`, and not to a run started with `--execution`, which refuses automatic retries.
+
 ## Running on Cursor
 
 Cursor can run a fleet's teammates. The orchestrator stays whichever harness you drive — Claude

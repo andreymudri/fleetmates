@@ -2198,7 +2198,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 142, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 148, 'reviews.mjs': 6, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2398,15 +2398,21 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **161 lines: 142 in `cli.mjs`, 6 in
+// can no longer drift away from the code unnoticed. It came to **167 lines: 148 in `cli.mjs`, 6 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **1 site in `cli.mjs`**: `ci-local`'s line writer, which passes every
+// The most recent move was **6 sites in `cli.mjs`**, all in `retro`: the could-not-read-state line
+// (the run id and the fs error), the no-such-run line, the refused-input line (`draftRetro`'s
+// message), the `--json` document (`printableBlock`; titles and evidence quote agent-written run
+// state), the nothing-to-propose line and the proposals header. Driven by `tests/retro.test.mjs`;
+// not row-driven here.
+//
+// The move before that was **1 site in `cli.mjs`**: `ci-local`'s line writer, which passes every
 // line `scripts/ci-local.mjs` prints (workflow paths, job ids, step names and skip reasons out of
 // the user's workflow files) through `printable`. Driven by `tests/ci-local.test.mjs`; not
 // row-driven here.
 //
-// The move before that was **17 sites in `cli.mjs`**, the CI reliability commands.
+// Before that, **17 sites in `cli.mjs`**, the CI reliability commands.
 // `windowsCommandArgv`'s batch-shim refusal (the argv command and the unsafe argument). `doctor`'s
 // CI section: the `ciAdvice` line, the skipped-workflow line (a workflow path and reason), the
 // unreadable-quarantine line and the release suggestion (a test id out of `fleetmates.flaky.json`).

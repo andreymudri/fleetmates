@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `usage` shows each subagent's peak context. With the new `cost` config it prices each subagent
+  per million tokens in your currency (`cost.prices`, with `*` as a fallback), shows the peak as a
+  share of the model's window (`cost.contextWindows`, `!` at 85% or more), and warns at 80% and
+  100% of `cost.budget`. The budget never stops a run or changes an exit code.
+- A headless teammate whose turn ends on a retriable provider limit is waited out and continued in
+  the same session, instead of being orphaned. `harnesses.<name>.limitWaitMinutes` caps a wait
+  (default 60, 0 turns it off). Only OpenCode names its errors today.
+- `retro --run <id>` prints proposed learnings from a run's fix rounds, failing gates, orphaned or
+  failed teammates and limit waits, in the `fleetmates.learnings.md` format. It writes nothing.
+
 ## v2.8.0
 
 ### Added
