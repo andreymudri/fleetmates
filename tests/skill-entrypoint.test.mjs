@@ -72,3 +72,14 @@ test('keeps the fleet invariants', async () => {
   assert.match(b, /never touches the main worktree|main worktree/i)
   assert.match(b, /tm-integrator/)
 })
+
+// fleet.mode (scripts/config.mjs): auto starts an eligible plan as a fleet without the question.
+test('the fleet policy reads fleet.mode before asking, and auto skips the question', async () => {
+  const b = await body()
+  const policy = b.indexOf('### The fleet policy')
+  const choice = b.indexOf('### Presenting the choice')
+  assert.ok(policy !== -1 && policy < choice, 'the fleet policy must come before the choice')
+  assert.match(b, /config get fleet\.mode --root <project root>/)
+  assert.match(b, /`fleet\.mode` is `ask` \(the default\) or `auto`\. With `auto`, run the plan through `init-run`,\s+show the phase breakdown in one short message, and start the fleet without asking\./)
+  assert.match(b, /When a fleet \*\*is\*\* eligible and `fleet\.mode` is `ask`, never ask in prose\./)
+})

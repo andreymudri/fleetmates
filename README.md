@@ -384,6 +384,13 @@ before a push where possible, and reported rather than hidden where not:
   and runs `ci-wait --branch <run branch>`, which polls the branch tip's GitHub Actions workflow
   runs through `gh` for up to `ci.waitMinutes` minutes (default 60). The merge is not offered while
   the remote CI is red, pending or unreadable.
+- After that, `land.mode` decides how the run branch lands: `pr` (the default) opens a pull request
+  without asking, and `ask` offers merge, pull request or keep. `land.autoMerge`, false by default
+  and accepted only in `fleetmates.gate.json`, merges that pull request when the remote CI passed
+  with at least one workflow run and no finding was left unresolved. A repository with no
+  workflows is never merged automatically.
+- `fleet.mode` is `ask` (the default) or `auto`. With `auto`, an eligible plan starts as a fleet
+  without the fleet-or-inline question.
 
 The same detector works as a GitHub Actions step, where it also prints `::warning` annotations and
 appends a table to the job summary:

@@ -53,9 +53,20 @@ A fleet is **eligible** when all of these hold:
 If any fails, take the inline path (`executing-plans`) and say why in one line. A two-task
 change costs more to orchestrate as a fleet than to just do.
 
+### The fleet policy
+
+When a fleet is eligible, read the `fleet.mode` key first:
+
+    node "<fleetmates root>/scripts/cli.mjs" config get fleet.mode --root <project root>
+
+`fleet.mode` is `ask` (the default) or `auto`. With `auto`, run the plan through `init-run`,
+show the phase breakdown in one short message, and start the fleet without asking. With `ask`,
+present the choice as described below. Set it per repository with
+`config set fleet.mode auto`, or with `--local` for this checkout only.
+
 ### Presenting the choice
 
-When a fleet **is** eligible, never ask in prose. Prose hides the two things the decision
+When a fleet **is** eligible and `fleet.mode` is `ask`, never ask in prose. Prose hides the two things the decision
 turns on: how much runs at once, and what it costs to be wrong. Run the plan through
 `init-run` first so you have the real phase breakdown, then ask with `AskUserQuestion`,
 recommending fleet, with a preview showing that breakdown:

@@ -3023,6 +3023,9 @@ const CONFIG_KEYS = [
   ...['enabled', 'resumes', 'respawns', 'staleMinutes', 'intervalMinutes', 'learn', 'spinFailures'].map((k) => `watch.${k}`),
   'ci.push',
   'ci.waitMinutes',
+  'fleet.mode',
+  'land.mode',
+  'land.autoMerge',
 ]
 
 // `unset` may also name one role's entry — `agents.implementer` is a real subtree of the layer
@@ -7783,7 +7786,7 @@ export async function runCli(argv, io = { out: console.log }) {
           // valid JSON is the string the caller typed, so `set agents.implementer.tier capable`
           // works without shell quoting.
           try { parsed = JSON.parse(rawValue) } catch { parsed = rawValue }
-          setKey(layer, key, validateKey(key, parsed))
+          setKey(layer, key, validateKey(key, parsed, file))
         } else {
           assertKnownKey(key, UNSETTABLE_KEYS)
           unsetKey(layer, key)

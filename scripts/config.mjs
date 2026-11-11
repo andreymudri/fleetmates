@@ -276,6 +276,47 @@ export function validateCi(ci, file) {
   return ci
 }
 
+// The two decisions the lead used to ask every time: run an eligible plan as a fleet, and how a
+// finished run branch lands. Neither is a verdict, so both layers may carry them, except
+// `land.autoMerge`: merging with no human in the loop is a repository decision, so it lives only
+// in the tracked fleetmates.gate.json, where a teammate can change it only through a task its plan
+// marks `(protected)`.
+export const FLEET_MODES = ['ask', 'auto']
+const FLEET_FIELDS = { mode: (v) => FLEET_MODES.includes(v) }
+const FLEET_RULES = { mode: `one of ${FLEET_MODES.join(', ')}` }
+
+export function validateFleet(fleet, file) {
+  if (fleet === null || typeof fleet !== 'object' || Array.isArray(fleet)) {
+    throw new ConfigError('fleet must be an object')
+  }
+  for (const [field, value] of Object.entries(fleet)) {
+    if (!Object.hasOwn(FLEET_FIELDS, field)) throw new ConfigError(`unknown key in ${file}: fleet.${field}`)
+    if (!FLEET_FIELDS[field](value)) throw new ConfigError(`fleet.${field} must be ${FLEET_RULES[field]}`)
+  }
+  return fleet
+}
+
+export const LAND_MODES = ['pr', 'ask']
+const LAND_FIELDS = {
+  mode: (v) => LAND_MODES.includes(v),
+  autoMerge: (v) => typeof v === 'boolean',
+}
+const LAND_RULES = { mode: `one of ${LAND_MODES.join(', ')}`, autoMerge: 'a boolean' }
+
+export function validateLand(land, file) {
+  if (land === null || typeof land !== 'object' || Array.isArray(land)) {
+    throw new ConfigError('land must be an object')
+  }
+  for (const [field, value] of Object.entries(land)) {
+    if (!Object.hasOwn(LAND_FIELDS, field)) throw new ConfigError(`unknown key in ${file}: land.${field}`)
+    if (field === 'autoMerge' && file === LOCAL_FILE) {
+      throw new ConfigError(`land.autoMerge may only be set in ${GATE_FILE}`)
+    }
+    if (!LAND_FIELDS[field](value)) throw new ConfigError(`land.${field} must be ${LAND_RULES[field]}`)
+  }
+  return land
+}
+
 export function validateLocal(local) {
   if (local === null || typeof local !== 'object' || Array.isArray(local)) {
     throw new ConfigError(`${LOCAL_FILE} must contain a JSON object`)
@@ -286,7 +327,7 @@ export function validateLocal(local) {
         `${key} is an enforcement key; it may only be set in ${GATE_FILE}`,
       )
     }
-    if (!['maxParallel', 'caveman', 'agents', 'harnesses', 'watch', 'ci'].includes(key)) {
+    if (!['maxParallel', 'caveman', 'agents', 'harnesses', 'watch', 'ci', 'fleet', 'land'].includes(key)) {
       throw new ConfigError(`unknown key in ${LOCAL_FILE}: ${key}`)
     }
   }
@@ -318,6 +359,8 @@ export function validateLocal(local) {
   if (local.harnesses !== undefined) validateHarnesses(local.harnesses, LOCAL_FILE)
   if (local.watch !== undefined) validateWatch(local.watch, LOCAL_FILE)
   if (local.ci !== undefined) validateCi(local.ci, LOCAL_FILE)
+  if (local.fleet !== undefined) validateFleet(local.fleet, LOCAL_FILE)
+  if (local.land !== undefined) validateLand(local.land, LOCAL_FILE)
   return local
 }
 
@@ -356,6 +399,8 @@ export function validateGate(gate) {
   if (gate.harnesses !== undefined) validateHarnesses(gate.harnesses, GATE_FILE)
   if (gate.watch !== undefined) validateWatch(gate.watch, GATE_FILE)
   if (gate.ci !== undefined) validateCi(gate.ci, GATE_FILE)
+  if (gate.fleet !== undefined) validateFleet(gate.fleet, GATE_FILE)
+  if (gate.land !== undefined) validateLand(gate.land, GATE_FILE)
   // Every entry in ENFORCEMENT_KEYS has a validator. If a future key joins that list without
   // one, refusing is the right direction — waving an unchecked enforcement key through is the
   // one outcome this must never have — but it is refused as a ConfigError, not as a raw
@@ -441,6 +486,9 @@ export async function loadConfig(root) {
       harnesses,
       // Literal defaults rather than an import of scripts/watch.mjs, so config.mjs does not depend on the watchdog.
       ci: { push: 'ask', waitMinutes: 60, ...gate.ci, ...local?.ci },
+      fleet: { mode: 'ask', ...gate.fleet, ...local?.fleet },
+      // autoMerge is read from the gate layer only; validateLocal refuses it in the local one.
+      land: { mode: 'pr', ...gate.land, ...local?.land, autoMerge: gate.land?.autoMerge ?? false },
       watch: { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, learn: true, spinFailures: 5, ...gate.watch, ...local?.watch },
     },
     sources,
@@ -488,7 +536,8 @@ export function unsetKey(obj, dotted) {
   return obj
 }
 
-export function validateKey(dotted, value) {
+// `file` is the layer being written; only land.autoMerge answers differently by layer.
+export function validateKey(dotted, value, file = GATE_FILE) {
   assertSafeKey(dotted)
   if (dotted === 'maxParallel') return VALIDATORS.maxParallel(value)
   if (dotted === 'caveman') return VALIDATORS.caveman(value)
@@ -496,6 +545,10 @@ export function validateKey(dotted, value) {
   if (watchMatch) { validateWatch({ [watchMatch[1]]: value }, LOCAL_FILE); return value }
   const ciMatch = /^ci\.([A-Za-z]+)$/.exec(dotted)
   if (ciMatch) { validateCi({ [ciMatch[1]]: value }, LOCAL_FILE); return value }
+  const fleetMatch = /^fleet\.([A-Za-z]+)$/.exec(dotted)
+  if (fleetMatch) { validateFleet({ [fleetMatch[1]]: value }, GATE_FILE); return value }
+  const landMatch = /^land\.([A-Za-z]+)$/.exec(dotted)
+  if (landMatch) { validateLand({ [landMatch[1]]: value }, file); return value }
   const agentMatch = /^agents\.([a-z]+)\.(tier|effort)$/.exec(dotted)
   if (agentMatch) {
     const [, role, field] = agentMatch
