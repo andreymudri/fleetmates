@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBatchBrief, composeBrief } from './brief.mjs'
-import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses } from './gate-config.mjs'
+import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses, protectedPaths } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
@@ -163,7 +163,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|ci-local|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
@@ -584,6 +584,7 @@ export const REQUIRED = {
   'platform-sim': [],
   flaky: [],
   'ci-wait': ['branch'],
+  'merge-guard': ['branch', 'base'],
   'ci-local': [],
   // Forwarded to the deck's own CLI, which belongs to no run; forwardDeck checks the subcommand.
   ui: [],
@@ -658,6 +659,7 @@ export const KNOWN_FLAGS = {
   'platform-sim': [],
   flaky: ['report'],
   'ci-wait': ['branch', 'minutes'],
+  'merge-guard': ['branch', 'base'],
   'ci-local': ['dry-run', 'keep-home', 'no-platform-sim'],
   // Forwarded to hub/bin/fleetmates-deck.mjs; forwardDeck narrows these per deck subcommand.
   ui: [],
@@ -3059,6 +3061,9 @@ const CONFIG_KEYS = [
   ...['enabled', 'resumes', 'respawns', 'staleMinutes', 'intervalMinutes', 'learn', 'spinFailures'].map((k) => `watch.${k}`),
   'ci.push',
   'ci.waitMinutes',
+  'fleet.mode',
+  'land.mode',
+  'land.autoMerge',
 ]
 
 // `unset` may also name one role's entry — `agents.implementer` is a real subtree of the layer
@@ -4599,6 +4604,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const baseBranch = flags.base === true
       ? ''
       : (flags.base ?? await resolveBaseBranch(createGit({ cwd: root }), undefined).catch(() => ''))
+    const baseDerived = flags.base === undefined && baseBranch !== ''
 
     const contextAnchor = {}
     const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
@@ -4722,6 +4728,10 @@ export async function runCli(argv, io = { out: console.log }) {
       ? ` in ${batches.length} batch${batches.length === 1 ? '' : 'es'}: ${batches.map((b) => b.map((t) => printable(t.id)).join('+')).join(', ')}`
       : ''
     io.out(`workflow for run ${printable(runId)}, phase ${phase}: ${phaseTasks.length} task${phaseTasks.length === 1 ? '' : 's'}${batched}`)
+    // A derived base is a guess (the one of main/master that exists) written into every brief as
+    // the task's checkout start point. It is wrong for a run cut from any other branch, and with
+    // `--out` nobody reads the briefs, so it is named here. The name is one of two literals.
+    if (baseDerived) io.out(`base ${baseBranch} was derived, not passed: pass --base if this run was cut from another branch`)
     return 0
   }
 
@@ -7898,6 +7908,57 @@ export async function runCli(argv, io = { out: console.log }) {
     return code
   }
 
+  // `merge-guard --branch <b> --base <base>`: whether land.autoMerge may merge this branch with no
+  // human. Exit 0 it may; 1 the branch changes a protected path (the gate manifest, the flaky
+  // quarantine, the manifest's `protected` list) or a CI workflow, each named; 2 a bad invocation.
+  // The protected set is read from the BASE's manifest: the run branch may have edited its own.
+  // A workflow is refused because a run that rewrites CI makes a green ci-wait mean nothing.
+  if (command === 'merge-guard') {
+    for (const name of ['branch', 'base']) {
+      if (typeof flags[name] !== 'string' || flags[name] === '') {
+        io.out(`--${name} takes a branch name\n\n${USAGE}`)
+        return 2
+      }
+    }
+    const git = createGit({ cwd: root })
+    const shas = {}
+    for (const name of ['branch', 'base']) {
+      try {
+        shas[name] = await git.resolveRef(`refs/heads/${flags[name]}`)
+      } catch {
+        io.out(`no branch ${printable(flags[name])} in ${printable(root)}`)
+        return 2
+      }
+    }
+    let config = {}
+    const shown = await defaultGitExec(['show', `${shas.base}:${GATE_FILE}`], root)
+    if (shown.code === 0) {
+      try {
+        config = JSON.parse(shown.stdout)
+      } catch {
+        io.out(`${GATE_FILE} on ${printable(flags.base)} is not valid JSON: auto-merge refused`)
+        return 1
+      }
+    }
+    const diff = await defaultGitExec(['diff', '-z', '--no-renames', '--name-only', `${shas.base}...${shas.branch}`], root)
+    if (diff.code !== 0) {
+      io.out(`could not diff ${printable(flags.base)}...${printable(flags.branch)}: ${printable(diff.stderr.trim())}`)
+      return 2
+    }
+    const guarded = new Set(protectedPaths(config).map((p) => p.toLowerCase()))
+    const changed = diff.stdout.split('\0').filter(Boolean)
+    const blocked = changed.filter((file) => {
+      const folded = file.replace(/\\/g, '/').toLowerCase()
+      return guarded.has(folded) || folded.startsWith('.github/workflows/')
+    })
+    if (blocked.length > 0) {
+      io.out(`auto-merge refused: ${printable(flags.branch)} changes ${blocked.map(printable).join(', ')}`)
+      return 1
+    }
+    io.out(`auto-merge allowed: ${printable(flags.branch)} changes no protected path or CI workflow`)
+    return 0
+  }
+
   // `ci-wait --branch <b> [--minutes <n>]`: waits for the remote CI of the branch's tip commit.
   // Exit 0 every workflow run on the tip succeeded (or the tip has no workflows: skipped, and said),
   // 1 one failed, 3 still pending when the window closed, 4 `gh` could not read it, 2 a bad
@@ -8060,7 +8121,7 @@ export async function runCli(argv, io = { out: console.log }) {
           // valid JSON is the string the caller typed, so `set agents.implementer.tier capable`
           // works without shell quoting.
           try { parsed = JSON.parse(rawValue) } catch { parsed = rawValue }
-          setKey(layer, key, validateKey(key, parsed))
+          setKey(layer, key, validateKey(key, parsed, file))
         } else {
           assertKnownKey(key, UNSETTABLE_KEYS)
           unsetKey(layer, key)

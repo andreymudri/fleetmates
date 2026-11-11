@@ -860,14 +860,19 @@ export async function dispatchPhase({
         limitWaits: [...previous, { type: wait.type, delayMs: wait.delayMs, at: Date.now() }] }
       await writeJson(sessionFile, record)
       await sleep(wait.delayMs)
+      // The resume time is dropped as soon as the wait is over, before the resume is attempted: a
+      // resume that throws is orphaned from the record on disk, and one still carrying `resumeAt`
+      // would read as a task about to come back.
+      const { resumeAt: _resumeAt, ...rest } = record
+      record = { ...rest, state: 'running' }
+      await writeJson(sessionFile, record)
       await Promise.all([paths.resultPath, paths.streamPath, paths.errPath].map(file => rm(file, { force: true })))
       const again = sessionId
         ? await adapter.resume({ sandbox, sessionId, message: LIMIT_CONTINUE, model, effort, network, ...paths })
         : await adapter.spawn({ sandbox, prompt, model, effort, network, ...paths })
       const exitedAgain = waitForExit(again.child, timeoutMs)
       sessionId = (await again.sessionId) ?? sessionId
-      const { resumeAt: _resumeAt, ...rest } = record
-      record = { ...rest, sessionId, state: 'running' }
+      record = { ...record, sessionId }
       await writeJson(sessionFile, record)
       if ((await exitedAgain) === 'timeout') return orphan('timeout')
       await again.flushed
