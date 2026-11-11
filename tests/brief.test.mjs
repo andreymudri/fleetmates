@@ -984,3 +984,154 @@ test('malformed trusted runtime refuses composition instead of legacy fallback',
     assert.throws(()=>composeBrief({...FULL,task:{...TASK,runtime:{...runtime,...changed}}}),/invalid trusted/)
   }
 })
+
+// ---------------------------------------------------------------------------------------------
+// Batch briefs (docs/specs/2026-11-06-cost-cuts-design.md, section 5): one teammate does several
+// same-tier tasks in sequence, in one worktree, each on its own branch cut from the base.
+// ---------------------------------------------------------------------------------------------
+
+const BATCH = {
+  tasks: [
+    { id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], branch: 'fleetmates/r1/T1' },
+    { id: 'T2', title: 'db schema', files: ['src/db.ts'], branch: 'fleetmates/r1/T2' },
+    { id: 'T3', title: 'cache layer', files: ['src/cache.ts'], branch: 'fleetmates/r1/T3' },
+  ],
+  runId: 'r1',
+  planPath: 'docs/plans/p.md',
+  baseBranch: 'main',
+  constraints: ['Node >= 24.2.0'],
+}
+
+const batchModule = async () => {
+  const mod = await import('../scripts/brief.mjs')
+  assert.equal(typeof mod.composeBatchBrief, 'function', 'brief.mjs must export composeBatchBrief')
+  return mod.composeBatchBrief
+}
+
+test('a batch brief opens by naming its tasks in order and the per-task sequence', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  const opening = brief.slice(0, at(brief, 'TASK 1 OF 3'))
+  assert.match(opening, /^You are tm-implementer for a batch of 3 tasks: T1, T2, T3\./)
+  assert.ok(opening.includes('one after another, in this order, in this same worktree'), 'the opening must state the order and the shared worktree')
+  assert.ok(opening.includes('never from the previous task\'s branch'), 'the opening must say each checkout starts from the base, not the previous branch')
+  assert.ok(opening.includes('its own checkout from the base'), 'the opening must say each task checks out from the base')
+  assert.ok(opening.includes('its own locate, its own commits and its own complete'), 'the opening must name each per-task step')
+  assert.ok(opening.includes('ONE result per task'), 'the opening must announce one result per task')
+})
+
+test('every task of a batch runs checkout, locate, complete and commit before the next task starts', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  let cursor = 0
+  for (const [i, task] of BATCH.tasks.entries()) {
+    const steps = [
+      `TASK ${i + 1} OF 3: ${task.id}: ${task.title}.`,
+      `git checkout -B ${task.branch} main`,
+      `locate --run r1 --task ${task.id}`,
+      `--run r1 --task ${task.id} --plan docs/plans/p.md --base main`,
+      `Commit task ${task.id}'s work on ${task.branch}`,
+    ]
+    for (const step of steps) {
+      const position = brief.indexOf(step, cursor)
+      assert.ok(position > cursor || (cursor === 0 && position >= 0), `expected ${JSON.stringify(step)} after position ${cursor}`)
+      cursor = position
+    }
+  }
+  assert.ok(cursor < at(brief, 'RESULT. After the last task'), 'the result instruction comes after the last task')
+})
+
+test('no task of a batch branches from the previous task\'s branch', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  const checkouts = brief.split('\n').filter((line) => line.trim().startsWith('git checkout -B'))
+  assert.deepEqual(checkouts.map((line) => line.trim()), BATCH.tasks.map((t) => `git checkout -B ${t.branch} main`))
+})
+
+test('a batch brief requires a clean worktree before each next checkout', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  const opening = brief.slice(0, at(brief, 'TASK 1 OF 3'))
+  assert.ok(opening.includes('git status --porcelain must print nothing'), 'uncommitted work would ride the checkout onto the next branch')
+})
+
+test('a batch brief asks for one result per task, each naming its taskId', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  const result = brief.slice(at(brief, 'RESULT. After the last task'))
+  assert.ok(result.includes('"results"'), 'the result names the results array')
+  assert.ok(result.includes('exactly one entry per task'), 'the result asks for one entry per task')
+  assert.ok(result.includes('"taskId"'), 'each entry names its task')
+  assert.ok(result.includes('status "blocked"'), 'an unfinished task still gets an entry')
+})
+
+test('only the first task of a batch runs the full baseline', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  const sections = brief.split(/^TASK \d OF 3: /m).slice(1)
+  assert.equal(sections.length, 3)
+  assert.ok(sections[0].includes('Run the project\'s test command once, IN THE FOREGROUND'), 'the first task runs the baseline')
+  for (const later of sections.slice(1)) {
+    assert.ok(!later.includes('Run the project\'s test command once'), 'a later task does not rerun the full baseline')
+    assert.ok(later.includes('The worktree setup from task T1 stands'), 'a later task is told the setup carries over')
+  }
+})
+
+test('the shared rules render once in a batch brief, before the first task', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  for (const marker of ['SCOPE. ', 'ENVIRONMENT. ', 'CLAIMS. ', 'GLOBAL CONSTRAINTS:', 'EVIDENCE BEFORE DONE.']) {
+    assert.equal(brief.split(marker).length - 1, 1, `${marker} must render exactly once`)
+    assert.ok(at(brief, marker) < at(brief, 'TASK 1 OF 3'), `${marker} must come before the first task`)
+  }
+  assert.ok(brief.includes('- Node >= 24.2.0'))
+})
+
+test('each task of a batch keeps its own plan section and file set', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief(BATCH)
+  const sections = brief.split(/^TASK \d OF 3: /m).slice(1)
+  for (const [i, task] of BATCH.tasks.entries()) {
+    assert.ok(sections[i].includes(`implement the section titled "Task ${i + 1}:"`), `task ${task.id} names its plan section`)
+    assert.ok(sections[i].includes(`You may create or modify ONLY these files: ${task.files.join(', ')}.`), `task ${task.id} names its file set`)
+  }
+})
+
+test('a fix-round batch checks out each task branch without resetting it', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief({ ...BATCH, fixRound: true })
+  const resets = brief.split('\n').filter((line) => line.trim().startsWith('git checkout -B'))
+  assert.deepEqual(resets, [], 'a fix round must not reset any task branch')
+  assert.ok(!brief.includes('checkout from the base'), 'a fix-round opening must not promise a checkout from the base')
+  for (const task of BATCH.tasks) assert.ok(brief.includes(`    git checkout ${task.branch}\n`), `missing the fix-round checkout of ${task.id}`)
+})
+
+test('a caveman batch brief keeps every per-task command and adds the style block once', async () => {
+  const composeBatchBrief = await batchModule()
+  const brief = composeBatchBrief({ ...BATCH, caveman: 'full' })
+  assert.match(brief, /^You are tm-implementer\. Batch of 3 tasks: T1, T2, T3\./)
+  for (const task of BATCH.tasks) {
+    assert.ok(brief.includes(`git checkout -B ${task.branch} main`))
+    assert.ok(brief.includes(`locate --run r1 --task ${task.id}`))
+    assert.ok(brief.includes(`--task ${task.id} --plan docs/plans/p.md --base main`))
+  }
+  assert.equal(brief.split('STYLE. ').length - 1, 1)
+  assert.ok(brief.includes('use it at level full'))
+})
+
+test('a batch brief carries each task its own advisory context bundle', async () => {
+  const composeBatchBrief = await batchModule()
+  const bundle = (task) => ({ task, role: 'implementer', entries: [] })
+  const brief = composeBatchBrief({ ...BATCH, contextBundles: { T2: bundle('T2') } })
+  const sections = brief.split(/^TASK \d OF 3: /m).slice(1)
+  assert.ok(!sections[0].includes('ANCHORED PLAN AND ADVISORY LEARNING CONTEXT'))
+  assert.ok(sections[1].includes('ANCHORED PLAN AND ADVISORY LEARNING CONTEXT'))
+  assert.ok(sections[1].includes('"task":"T2"'))
+})
+
+test('composeBatchBrief refuses an empty batch, a repeated task and a task without a branch', async () => {
+  const composeBatchBrief = await batchModule()
+  assert.throws(() => composeBatchBrief({ ...BATCH, tasks: [] }), /composeBatchBrief: a batch needs at least one task/)
+  assert.throws(() => composeBatchBrief({ ...BATCH, tasks: [BATCH.tasks[0], BATCH.tasks[0]] }), /composeBatchBrief: task T1 appears twice/)
+  assert.throws(() => composeBatchBrief({ ...BATCH, tasks: [{ ...BATCH.tasks[0], branch: '' }] }), /composeBrief: task T1 has no branch/)
+})

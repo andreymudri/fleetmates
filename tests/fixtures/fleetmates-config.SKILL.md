@@ -7,7 +7,7 @@ description: Use when changing how the fleet runs — parallelism, or model tier
 
 ## What `config` covers, and what it does not
 
-`config` manages the **ergonomics** keys only: `maxParallel`, `caveman`, and
+`config` manages the **ergonomics** keys only: `maxParallel`, `batchSize`, `caveman`, and
 `agents.<role>.tier`/`agents.<role>.effort`. Those, plus the per-harness `harnesses.<name>.*` keys
 documented under **Harness settings** below, are the keys `config set` accepts, in either
 layer, subject to the enforcement rule below. `config unset` removes only the ergonomics

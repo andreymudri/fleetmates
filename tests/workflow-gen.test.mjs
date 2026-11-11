@@ -1,9 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { generatePhaseWorkflow } from '../scripts/workflow-gen.mjs'
 
 const tasks = [
@@ -804,4 +804,196 @@ test('the embedded brief and composeBrief called directly are byte-identical', a
     constraints,
   })
   assert.equal(prompt, expected, 'the embedded brief must be byte-identical to composeBrief\'s own output')
+})
+
+// ---------------------------------------------------------------------------------------------
+// Batched implementers (docs/specs/2026-11-06-cost-cuts-design.md, section 5).
+// ---------------------------------------------------------------------------------------------
+
+const CLI_PATH = join(fileURLToPath(new URL('../scripts/', import.meta.url)), 'cli.mjs')
+// The brief names the CLI by absolute path, JSON-quoted, and BRIEFS JSON-quotes the brief again.
+const CLI_IN_BRIEFS = JSON.stringify(JSON.stringify(CLI_PATH)).slice(1, -1)
+
+const tiered = [
+  { id: 'T1', title: 'auth middleware', files: ['src/auth.ts'], phase: 1, tier: 'cheap' },
+  { id: 'T2', title: 'db schema', files: ['src/db.ts'], phase: 1, tier: 'cheap' },
+  { id: 'T3', title: 'api routes', files: ['src/api.ts', 'src/api.test.ts'], phase: 1, tier: 'capable' },
+  { id: 'T4', title: 'cache layer', files: ['src/cache.ts'], phase: 1, tier: 'cheap' },
+]
+const goldenInputs = {
+  runId: 'r1', phase: 1, tasks: tiered, maxParallel: 2,
+  tierModels: { cheap: 'haiku', capable: 'opus' }, planPath: 'docs/plans/p.md', baseBranch: 'main',
+  constraints: ['Node >= 24.2.0'], effort: 'high', neighbours: { T2: [{ path: 'src/x.ts', confidence: 0.4 }] },
+}
+
+test('batchTasks groups by tier in plan order and chunks each tier to batchSize', async () => {
+  const { batchTasks } = await import('../scripts/workflow-gen.mjs')
+  const plan = [
+    { id: 'T1', tier: 'cheap' }, { id: 'T2', tier: 'capable' }, { id: 'T3', tier: 'cheap' },
+    { id: 'T4', tier: 'cheap' }, { id: 'T5', tier: 'capable' }, { id: 'T6', tier: 'cheap' }, { id: 'T7' },
+  ]
+  const ids = (batches) => batches.map((batch) => batch.map((t) => t.id))
+  assert.deepEqual(ids(batchTasks(plan, 3)), [['T1', 'T3', 'T4'], ['T2', 'T5'], ['T6'], ['T7']])
+  assert.deepEqual(ids(batchTasks(plan, 2)), [['T1', 'T3'], ['T2', 'T5'], ['T4', 'T6'], ['T7']])
+  assert.deepEqual(ids(batchTasks(plan, 1)), plan.map((t) => [t.id]))
+  assert.deepEqual(ids(batchTasks(plan, 10)), [['T1', 'T3', 'T4', 'T6'], ['T2', 'T5'], ['T7']])
+})
+
+test('batchTasks never puts two tiers in one batch', async () => {
+  const { batchTasks } = await import('../scripts/workflow-gen.mjs')
+  const plan = Array.from({ length: 9 }, (_, i) => ({ id: `T${i + 1}`, tier: ['cheap', 'mid', 'capable'][i % 3] }))
+  for (const size of [1, 2, 3, 4, 9]) {
+    const batches = batchTasks(plan, size)
+    for (const batch of batches) {
+      assert.equal(new Set(batch.map((t) => t.tier)).size, 1, `size ${size}: a batch mixed tiers`)
+      assert.ok(batch.length <= size, `size ${size}: a batch is over its size`)
+    }
+    assert.deepEqual(batches.flat().map((t) => t.id).sort(), plan.map((t) => t.id).sort(), `size ${size}: every task lands in exactly one batch`)
+  }
+})
+
+test('batchTasks refuses a batch size that is not a positive integer', async () => {
+  const { batchTasks } = await import('../scripts/workflow-gen.mjs')
+  for (const bad of [0, -1, 1.5, '3', null]) {
+    assert.throws(() => batchTasks([{ id: 'T1' }], bad), /batchSize must be an integer >= 1/)
+  }
+})
+
+test('with batchSize 1 the generated script is byte-identical to the unbatched one', async () => {
+  const golden = await readFile(new URL('./fixtures/phase-workflow-unbatched.js.txt', import.meta.url), 'utf8')
+  for (const options of [{}, { batchSize: 1 }]) {
+    const src = await generatePhaseWorkflow({ ...goldenInputs, ...options })
+    assert.ok(src.includes(CLI_IN_BRIEFS), 'the CLI path placeholder must have something to replace')
+    assert.equal(src.replaceAll(CLI_IN_BRIEFS, '\\"<CLI>\\"'), golden, `options ${JSON.stringify(options)}`)
+  }
+})
+
+test('a phase whose batches each hold one task generates the unbatched script', async () => {
+  const mixed = tiered.map((t, i) => ({ ...t, tier: ['cheap', 'mid', 'capable', 'cheap'][i] }))
+  const one = await generatePhaseWorkflow({ ...goldenInputs, tasks: mixed.slice(0, 3), batchSize: 1 })
+  const three = await generatePhaseWorkflow({ ...goldenInputs, tasks: mixed.slice(0, 3), batchSize: 3 })
+  assert.doesNotMatch(three, /const BATCHES =/)
+  assert.equal(three, one)
+})
+
+test('a batched phase hands each task its own advisory context bundle', async () => {
+  const bundle = { task: 'T2', role: 'implementer', entries: [] }
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3, contextBundles: { T2: bundle } })
+  const { calls } = await runBatched(src, () => null)
+  const cheap = calls[0].prompt
+  const t2 = cheap.slice(cheap.indexOf('TASK 2 OF 3: T2'), cheap.indexOf('TASK 3 OF 3: T4'))
+  assert.ok(t2.includes('ANCHORED PLAN AND ADVISORY LEARNING CONTEXT'), 'T2 carries its bundle')
+  assert.ok(!calls[1].prompt.includes('ANCHORED PLAN AND ADVISORY LEARNING CONTEXT'), 'T3 has no bundle')
+})
+
+// Runs a batched script with agent() answering from `answer(prompt, options)`.
+async function runBatched(src, answer) {
+  const body = src.replace(/^export const meta = /m, 'const meta = ')
+  const calls = []
+  const agent = (prompt, options) => {
+    calls.push({ prompt, options })
+    return Promise.resolve(answer(prompt, options))
+  }
+  const run = new Function('phase', 'parallel', 'agent', `return (async () => { ${body} })`)(
+    () => {}, (fns) => Promise.all(fns.map((f) => f())), agent)
+  return { calls, out: await run() }
+}
+
+const result = (taskId, status = 'done') => ({ taskId, status, branch: `fleetmates/r1/${taskId}`, filesChanged: [], summary: `s ${taskId}`, blockers: [] })
+
+test('a batched phase dispatches one agent per batch with the batch model and a per-task result schema', async () => {
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3 })
+  const { calls } = await runBatched(src, () => null)
+  assert.deepEqual(calls.map((c) => [c.options.label, c.options.model]), [['T1+T2+T4', 'haiku'], ['T3', 'opus']])
+  const { RESULT_SCHEMA } = await import('../scripts/result-schema.mjs')
+  for (const { options } of calls) {
+    assert.equal(options.isolation, 'worktree')
+    assert.equal(options.agentType, 'fleetmates:tm-implementer')
+    assert.equal(options.effort, 'high')
+    const tasksOf = options.label.split('+')
+    const schema = options.schema
+    assert.deepEqual(schema.required, ['results'])
+    assert.equal(schema.additionalProperties, false)
+    const list = schema.properties.results
+    assert.equal(list.type, 'array')
+    assert.equal(list.minItems, tasksOf.length)
+    assert.equal(list.maxItems, tasksOf.length)
+    assert.deepEqual(list.items.properties.taskId, { type: 'string', enum: tasksOf })
+    assert.deepEqual(list.items.required, ['taskId', ...RESULT_SCHEMA.required])
+    assert.equal(list.items.additionalProperties, false)
+    for (const [key, spec] of Object.entries(RESULT_SCHEMA.properties)) assert.deepEqual(list.items.properties[key], spec, `item property ${key}`)
+  }
+})
+
+test('batched results flatten to the per-task shape in plan order', async () => {
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3 })
+  const { out } = await runBatched(src, (_, options) => ({ results: options.label.split('+').reverse().map((id) => result(id)) }))
+  assert.deepEqual(out.orphaned, [])
+  assert.deepEqual(out.results, ['T1', 'T2', 'T3', 'T4'].map((id) => result(id)))
+  assert.deepEqual(Object.keys(out.results[0]), ['taskId', 'status', 'branch', 'filesChanged', 'summary', 'blockers'])
+})
+
+test('every task of a batched phase without a returned result is orphaned', async () => {
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3 })
+  // The cheap batch returns T1 only, plus T3 (a task of the other batch) and T1 again; the capable
+  // batch dies. Only T1's first entry counts.
+  const { out } = await runBatched(src, (_, options) => (options.label === 'T3' ? null
+    : { results: [result('T1'), result('T3'), { ...result('T1'), summary: 'second' }] }))
+  assert.deepEqual(out.results, [result('T1')])
+  assert.deepEqual(out.orphaned, ['T2', 'T3', 'T4'])
+})
+
+test('a batch answer that is not an object with a results array orphans the whole batch', async () => {
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3 })
+  for (const bad of [undefined, 'done', { results: 'T1' }, { status: 'done' }]) {
+    const { out } = await runBatched(src, (_, options) => (options.label === 'T3' ? { results: [result('T3')] } : bad))
+    assert.deepEqual(out.results, [result('T3')], `answer ${JSON.stringify(bad)}`)
+    assert.deepEqual(out.orphaned, ['T1', 'T2', 'T4'], `answer ${JSON.stringify(bad)}`)
+  }
+})
+
+test('each batch is briefed with composeBatchBrief over its own tasks, byte for byte', async () => {
+  const { composeBatchBrief } = await import('../scripts/brief.mjs')
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3 })
+  const { calls } = await runBatched(src, () => null)
+  const branchOf = (t) => ({ id: t.id, title: t.title, files: t.files, branch: `fleetmates/r1/${t.id}` })
+  const expected = (ids, extra = {}) => composeBatchBrief({
+    tasks: ids.map((id) => tiered.find((t) => t.id === id)).map((t) => ({ ...branchOf(t), ...extra[t.id] })),
+    runId: 'r1', planPath: 'docs/plans/p.md', baseBranch: 'main', constraints: ['Node >= 24.2.0'],
+  })
+  assert.equal(calls[0].prompt, expected(['T1', 'T2', 'T4'], { T2: { neighbours: [{ path: 'src/x.ts', confidence: 0.4 }] } }))
+  assert.equal(calls[1].prompt, expected(['T3']))
+})
+
+test('a batched script names its batches in the meta description and parses as a module', async () => {
+  const src = await generatePhaseWorkflow({ ...goldenInputs, batchSize: 3 })
+  assert.match(src, /description: 'Run phase 1 of fleetmates run r1 \(4 tasks in 2 batches, max 2 parallel\)'/)
+  const split = src.indexOf('\nconst TASKS')
+  assert.ok(split > 0, 'expected a TASKS declaration after the meta literal')
+  const wrapped = `${src.slice(0, split)}\nexport const run = async (phase, parallel, agent) => {${src.slice(split)}\n}\n`
+  const dir = await mkdtemp(join(tmpdir(), 'workflow-gen-'))
+  try {
+    const file = join(dir, 'phase.mjs')
+    await writeFile(file, wrapped, 'utf8')
+    const mod = await import(pathToFileURL(file).href)
+    assert.equal(mod.meta.name, 'fleetmates-r1-phase-1')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a batched script carries a task title verbatim and cannot be injected through it', async () => {
+  const tricky = [
+    { id: 'T1', title: 'ok__BRIEFS__ "+(globalThis.PWNED=1)+"', files: ['a.ts'], phase: 1 },
+    { id: 'T2', title: 'b', files: ['b.ts'], phase: 1 },
+  ]
+  const src = await generatePhaseWorkflow({ runId: 'r1', phase: 1, tasks: tricky, maxParallel: 2, baseBranch: '"+(globalThis.PWNED=1)+"', batchSize: 3 })
+  try {
+    const { calls } = await runBatched(src, () => null)
+    assert.equal(globalThis.PWNED, undefined)
+    assert.equal(calls.length, 1)
+    assert.ok(calls[0].prompt.includes('TASK 1 OF 2: T1: ok__BRIEFS__ "+(globalThis.PWNED=1)+".'))
+  } finally {
+    delete globalThis.PWNED
+  }
 })

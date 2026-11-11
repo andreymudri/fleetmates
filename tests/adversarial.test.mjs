@@ -1353,7 +1353,7 @@ test('--results naming a check the manifest declares twice is rejected rather th
       { name: 'fileset', kind: 'fileset' },
       { name: 'ownership', kind: 'ownership' },
       { name: 'review', kind: 'command', run: 'node -e ""' },
-      { name: 'review', kind: 'agent' },
+      { name: 'review', kind: 'agent', scope: 'phase' },
     ])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
 
@@ -1369,7 +1369,7 @@ test('--results cannot declare a failing review optional and turn the verdict in
     await commitManifest(root, [
       { name: 'fileset', kind: 'fileset' },
       { name: 'ownership', kind: 'ownership' },
-      { name: 'review', kind: 'agent' },
+      { name: 'review', kind: 'agent', scope: 'phase' },
     ])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
 
@@ -1397,7 +1397,7 @@ test('supplying a legitimate agent result leaves the fileset and ownership resul
     await commitManifest(root, [
       { name: 'fileset', kind: 'fileset' },
       { name: 'ownership', kind: 'ownership' },
-      { name: 'review', kind: 'agent' },
+      { name: 'review', kind: 'agent', scope: 'phase' },
     ])
     await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
 
@@ -2333,5 +2333,48 @@ test('instruction lint rejects committed task instructions even when the worktre
     const integrated = await runCliOn(root, ['complete', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--base', 'main', '--enforcement-only'])
     assert.equal(integrated.code, 3, integrated.out)
     assert.match(integrated.out, /instruction security lint.*refusal-override/)
+  })
+})
+
+// ============================================================================================
+// Run fix branches (docs/specs/2026-11-06-cost-cuts-design.md, section 2, fix route). After the
+// whole plan is integrated, `fix --phase run` routes a blocking run finding to one fix task on
+// `fleetmates/<run>/fix-<n>`, which `ownership` admits beside the task branches. Its bound is the
+// whole plan's declared set, the same one `fileset-run` holds the run to — not the file set `fix`
+// emitted, which lives in run state no check may read.
+// ============================================================================================
+
+async function integratedRun(root) {
+  await runCliOn(root, ['init-run', 'plan.md', '--run', 'r1'])
+  await taskBranch(root, 'r1', 'T1', { files: { 'a.mjs': 'x\n' } })
+  git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T1', 'fleetmates/r1/T1'])
+  await taskBranch(root, 'r1', 'T2', { files: { 'b.mjs': 'y\n' } })
+  git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge T2', 'fleetmates/r1/T2'])
+}
+
+test('LIMIT (run fix branch): a fix branch cut after the whole plan landed may carry any path some plan task declares', async () => {
+  await withRepo(async (root) => {
+    await integratedRun(root)
+    // The finding was about a.mjs; the fix branch also rewrites b.mjs, another task's file. Both
+    // are declared by the plan, so nothing computed from git and the plan can tell them apart.
+    await taskBranch(root, 'r1', 'fix-1', { files: { 'a.mjs': 'fixed\n', 'b.mjs': 'also\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge fix-1', 'fleetmates/r1/fix-1'])
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 0, out)
+    assert.equal(JSON.parse(out).verdict, 'PASS')
+  })
+})
+
+test('gate fails a run fix branch that carries a path no plan task declares', async () => {
+  await withRepo(async (root) => {
+    await integratedRun(root)
+    await taskBranch(root, 'r1', 'fix-1', { files: { 'a.mjs': 'fixed\n', 'stray.mjs': 'z\n' } })
+    git(root, ['merge', '--quiet', '--no-ff', '-m', 'Merge fix-1', 'fleetmates/r1/fix-1'])
+    const { code, out } = await runCliOn(root, ['gate', '--run', 'r1', '--plan', 'plan.md'])
+    assert.equal(code, 1, out)
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.ok(parsed.failed.includes('ownership'), out)
+    assert.match(parsed.results.find((r) => r.name === 'ownership').output, /stray\.mjs/)
   })
 })

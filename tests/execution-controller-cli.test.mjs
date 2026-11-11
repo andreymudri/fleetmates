@@ -144,7 +144,7 @@ async function project(t, { rolePolicy = policy } = {}) {
   const check = `${node} -e "process.exit(require('fs').existsSync('a.txt')?0:1)"`
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ skips: [{ file: 'tests/slow.test.mjs', reason: 'fixture standing skip' }],
     phases: { default: { fixRounds: 1, checks: [
-      { name: 'behavior', kind: 'command', run: check }, { name: 'review', kind: 'agent', lens: ['correctness'], blockOn: ['high'] }] } } }))
+      { name: 'behavior', kind: 'command', run: check }, { name: 'review', kind: 'agent', scope: 'phase', lens: ['correctness'], blockOn: ['high'] }] } } }))
   await writeFile(path.join(root, 'env.json'), JSON.stringify({ version: 1, toolchains: [{ name: 'node', command: process.execPath, argv: ['--version'], expected: 'v' }],
     lockfiles: [], setup: [], baseline: [{ name: 'runtime', run: `${node} -e 0`, timeoutMs: 20000 }], required: [], dependencies: 'clean-checkout' }))
   await writeFile(path.join(root, 'roles.json'), JSON.stringify(rolePolicy))

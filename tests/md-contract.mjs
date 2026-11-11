@@ -62,6 +62,7 @@
 // Zero dependencies; Node built-ins only, no markdown library.
 
 import assert from 'node:assert/strict'
+import { readFile, readdir } from 'node:fs/promises'
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -216,16 +217,19 @@ export function parseBlocks(source) {
 // Sections
 // ---------------------------------------------------------------------------
 
-function makeSection(title, level, blocks, label) {
+function makeSection(title, level, blocks, label, heading = null) {
   const prose = blocks.filter((b) => b.kind === 'paragraph' || b.kind === 'list-item')
   const statements = []
   for (const b of prose) {
     for (const text of statementsOf(b.text)) statements.push({ text, block: b })
   }
   return {
-    label: `${label} § ${title || '(preamble)'}`,
+    label: `${heading?.file ?? label} § ${title || '(preamble)'}`,
     title,
     level,
+    // The part this section's heading came from, for a document parsed from several files (see
+    // parseParts). Undefined for the primary part and for a single-source document.
+    source: heading?.source,
     blocks,
     prose,
     statements,
@@ -235,7 +239,31 @@ function makeSection(title, level, blocks, label) {
 }
 
 export function parseDoc(source, label = 'document') {
-  const blocks = parseBlocks(source)
+  return docOf(parseBlocks(source), label)
+}
+
+// One document parsed from several files, in the order given — a skill's SKILL.md followed by its
+// reference files. Each part is parsed into blocks ON ITS OWN, so a paragraph at the end of one
+// file can never run on into the first line of the next, and the blocks are then joined into one
+// document: sections, statements and `section(matcher)` see a single corpus, so a claim pinned in
+// a section is found wherever its section lives. A section that crosses a file boundary is real,
+// though: a reference opening with `##` closes the core's last `##`, but one opening with `###`
+// nests under it — split files at a heading of the level the core's sections use.
+//
+// Every block carries the part it came from. `file` names it in a section label; `source` is the
+// suffix `corpusSites` appends to a document's label, so a corpus inventory names the file each
+// sentence came from and a sentence that moves between a core and its reference fails the lock. The
+// primary part carries no `source`, which keeps its sites labelled with the document label alone.
+//
+//   parts  [{ text, file, source? }]
+export function parseParts(parts, label = 'document') {
+  const blocks = parts.flatMap((part) =>
+    parseBlocks(part.text).map((b) => ({ ...b, file: part.file, source: part.source })),
+  )
+  return docOf(blocks, label)
+}
+
+function docOf(blocks, label) {
   const sections = []
   const preambleEnd = blocks.findIndex((b) => b.kind === 'heading')
   sections.push(
@@ -246,7 +274,7 @@ export function parseDoc(source, label = 'document') {
     const level = blocks[i].level
     let end = i + 1
     while (end < blocks.length && !(blocks[end].kind === 'heading' && blocks[end].level <= level)) end++
-    sections.push(makeSection(blocks[i].text, level, blocks.slice(i + 1, end), label))
+    sections.push(makeSection(blocks[i].text, level, blocks.slice(i + 1, end), label, blocks[i]))
   }
 
   const doc = {
@@ -315,10 +343,10 @@ function show(statements) {
 // is one claim by construction, and `statementsOf` would only ever return it unchanged or, with a
 // terminator in it, cut it into fragments an assertion could pass on half of.
 export function claimSites(scope) {
-  const sites = (scope.statements ?? []).map((s) => ({ text: s.text, where: 'statement' }))
-  if (scope.title) sites.push({ text: scope.title, where: 'heading' })
+  const sites = (scope.statements ?? []).map((s) => ({ text: s.text, where: 'statement', source: s.block.source }))
+  if (scope.title) sites.push({ text: scope.title, where: 'heading', source: scope.source })
   for (const b of scope.blocks ?? []) {
-    if (b.kind === 'heading') sites.push({ text: b.text, where: 'heading' })
+    if (b.kind === 'heading') sites.push({ text: b.text, where: 'heading', source: b.source })
   }
   return sites
 }
@@ -347,7 +375,7 @@ export function corpusSites(docs, subject) {
   const out = []
   for (const { label, doc } of ordered) {
     for (const site of claimSites(doc)) {
-      if (subject.test(site.text)) out.push(`${label} :: ${site.text}`)
+      if (subject.test(site.text)) out.push(`${site.source ? `${label}/${site.source}` : label} :: ${site.text}`)
     }
   }
   return out
@@ -493,4 +521,57 @@ export function assertClaim(scope, spec) {
   )
 
   return hit
+}
+
+// ---------------------------------------------------------------------------
+// Skill corpus
+// ---------------------------------------------------------------------------
+
+export const SKILLS_DIR = new URL('../skills/', import.meta.url)
+
+// A skill is its SKILL.md plus every `reference/*.md` beside it, in name order. The core is what an
+// agent loads; a reference is read on demand, and a claim moved from one to the other is still the
+// skill's claim. Every test reads a skill through this one reader, so a sentence lock, a
+// cross-skill scan or a corpus inventory follows a sentence wherever it lands in the skill, instead
+// of a scan silently covering the core alone.
+//
+// What it reads: regular `.md` files directly under `reference/`, nothing nested. A missing
+// `reference/` is a skill with no references; any other read failure throws.
+export async function skillFiles(name, { dir = SKILLS_DIR } = {}) {
+  let refs = []
+  try {
+    refs = (await readdir(new URL(`${name}/reference/`, dir), { withFileTypes: true }))
+      .filter((e) => e.isFile() && e.name.endsWith('.md'))
+      .map((e) => e.name)
+      .sort()
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  return [
+    { file: `${name}/SKILL.md`, path: 'SKILL.md' },
+    ...refs.map((r) => ({ file: `${name}/reference/${r}`, path: `reference/${r}`, source: `reference/${r}` })),
+  ]
+}
+
+//   fields  the SKILL.md frontmatter
+//   raw     every file's full text, SKILL.md first, joined by a blank line
+//   body    the same with SKILL.md's frontmatter removed
+//   doc     parseParts over the same files; section labels and corpus sites name each file
+//   files   [{ file, path, source?, text }] in reading order
+// `transform` runs over each file's text before anything else, e.g. to strip comments.
+export async function readSkill(name, { dir = SKILLS_DIR, transform = (t) => t } = {}) {
+  const files = []
+  for (const f of await skillFiles(name, { dir })) {
+    files.push({ ...f, text: transform(await readFile(new URL(`${name}/${f.path}`, dir), 'utf8')) })
+  }
+  const [main, ...refs] = files
+  const { fields, body: mainBody } = splitFrontmatter(main.text, name)
+  const parts = [{ text: mainBody, file: main.file }, ...refs.map((r) => ({ text: r.text, file: r.file, source: r.source }))]
+  return {
+    fields,
+    raw: files.map((f) => f.text).join('\n\n'),
+    body: parts.map((p) => p.text).join('\n\n'),
+    doc: parseParts(parts, main.file),
+    files,
+  }
 }

@@ -123,7 +123,7 @@ used by worktree" until that worktree is pruned.
 
 ## The watchdog
 
-`watch`, started under `Monitor` after each dispatch (see `Watch the phase` in `parallel-execution`), acts on
+`watch`, started under `Monitor` after each direct-`Agent` dispatch (see `Watch the phase` in `parallel-execution`), acts on
 the signals `liveness` reports. It prints one JSON object per stdout line. The first is `start`,
 naming the stale window in use, for example
 `{"event":"start","staleMinutes":20,"learned":false,"samples":0}`. Then, every `intervalMinutes`,
@@ -144,9 +144,9 @@ An action prints an event naming the task and its attempt, for example
 `{"event":"resume","task":"T1","at":"<ISO time>","attempt":1}`, and appends a `watchdog` event to
 that task's ledger. An action on a spinning task also carries `reason: spinning`. A task whose
 freshness could not be measured gets one `unmeasured` event carrying the reason. A tick that fails
-prints `watch-error` with the message, and so does a ledger append that fails. The last line is
-`exit`: reason `phase-idle` with exit 0 once nothing in the phase is in flight, or reason `errors`
-with exit 1 after three failed ticks in a row. `watch --once` runs a single tick and exits 1 when
+prints `watch-error` with the message, and so does a ledger append that fails. Once nothing in
+the phase is in flight, `watch` exits 0 without printing an event. After three failed ticks in a
+row it prints `exit` with reason `errors` and exits 1. `watch --once` runs a single tick and exits 1 when
 that tick failed. The ladder is kept per task in `.fleetmates/<runId>/watch.json`, so a restarted
 `watch` picks up where the last one stopped.
 
@@ -158,7 +158,7 @@ that tick failed. The ladder is kept per task in `.fleetmates/<runId>/watch.json
 | `orphan` | Mark the task `orphaned` in status, `PushNotification` the owner with the task id, take no further action on it. |
 | `unmeasured` | `PushNotification` the owner with the task id and reason; take no action. |
 | `watch-error` | Nothing; three in a row end the watchdog with `exit` reason `errors`. |
-| `exit` | `phase-idle`: done. `errors`, or the Monitor stream ending with no `exit` event: restart `watch` once; `watch.json` keeps the ladder. |
+| `exit` | `errors`: restart `watch` once; `watch.json` keeps the ladder. The Monitor stream ending with no `exit` event is the idle exit when every task of the phase is `done`, `blocked` or `orphaned` in the run status; otherwise restart `watch` once. |
 
 `dispatch --task` without `--fix-round` exits 2 with "--task names the tasks of a repair round;
 pass it with --fix-round", so the respawn row names both flags.
