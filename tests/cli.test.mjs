@@ -6507,6 +6507,26 @@ test('gate --no-fleet needs neither --plan nor --run', async () => {
   })
 })
 
+// A review with no `scope` is the run's, and a solo gate has no run entry: leaving the review out
+// of the solo list turned the pending FAIL of 2.8.0 into a PASS with the review never run.
+test('gate --no-fleet leaves a run-scoped review pending instead of dropping it', async () => {
+  await withRepo(async ({ root, io, lines }) => {
+    await writeFile(
+      path.join(root, 'fleetmates.gate.json'),
+      JSON.stringify({ phases: { default: { checks: [
+        { name: 'noop', kind: 'command', run: 'node -e ""' },
+        { name: 'review', kind: 'agent', agent: 'tm-reviewer', lens: ['correctness'], blockOn: ['high'] },
+      ] } } }),
+      'utf8',
+    )
+    const code = await runCli(['gate', '--no-fleet', '--root', root], io)
+    assert.equal(code, 1)
+    const parsed = JSON.parse(lines[lines.length - 1])
+    assert.equal(parsed.verdict, 'FAIL')
+    assert.deepEqual(parsed.pending, ['review'])
+  })
+})
+
 // --- Review round: M2 — complete must surface the failing checks' own output, not just
 // their bare names, or a teammate cannot tell what actually went wrong.
 test('complete prints the failing checks\' output, not just their names', async () => {

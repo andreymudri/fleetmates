@@ -7310,11 +7310,12 @@ export async function runCli(argv, io = { out: console.log }) {
       return 3
     }
     const phaseName = flags.phase ?? 'default'
-    const all = checksForPhase(config, phaseName)
     // `=== true`, matching missingArgs: the two must agree about what counts as solo, or one
     // of them drops --run and --plan from the requirements while the other still runs the
     // enforcement checks, or vice versa.
     const solo = flags['no-fleet'] === true
+    // A solo gate keeps a run-scoped review in its own list: nothing computes a run entry after it.
+    const all = checksForPhase(config, phaseName, { solo })
 
     // --no-fleet is the only way the enforcement checks are skipped, and the caller must
     // say it. Inferring "solo" from missing state let deleting one file record a PASS.

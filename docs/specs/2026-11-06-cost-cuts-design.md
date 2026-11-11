@@ -66,10 +66,14 @@ reviewers judge work against the plan.
   `scope` is validated with the other enforcement keys: tracked manifest only.
 - **Phase gates.** `checksForPhase` leaves out agent checks whose effective scope is `run`. A phase
   gate is then the command checks plus `fileset`, `ownership` and the gate-computed `merge`.
-  `scope: "phase"` restores today's behaviour for a manifest that wants it.
+  `scope: "phase"` restores today's behaviour for a manifest that wants it. A solo gate
+  (`gate --no-fleet`) keeps the run-scoped agent checks: no run entry follows it, so it is the
+  only gate they can be in.
 - **Run gate.** `finish` computes one more entry, named `run`, after the numbered phases. Its
   checks come from `phases.run.checks` when declared. Otherwise they come from `phases.default`:
-  the command checks, the run-scoped agent checks and an injected `fileset-run` check.
+  the command checks, the run-scoped agent checks and an injected `fileset-run` check. A declared
+  `phases.run.checks` that does not name a run-scoped agent check of another block gets it
+  appended, so a declared review is never in no gate.
   - `fileset-run` passes when every path changed in `merge-base(base, runTip)..runTip` is declared
     by some task of the plan at the anchor, or is under the manifest's protected rules. It is
     computed from git and the anchored plan only.

@@ -12,6 +12,8 @@ reviewers about 17%. The changes below cut those two shares.
   it is absent) or `"phase"`, validated in the tracked manifest only. A run-scoped review leaves
   the phase gates, and `finish` computes one more entry, `run`, after the numbered phases: the
   command checks, the run-scoped reviews and `fileset-run`, or `phases.run.checks` when declared.
+  A declared `phases.run.checks` still gets the run-scoped reviews it does not name, and
+  `gate --no-fleet` keeps them in its own list, so a review is never left out of every gate.
   Its results arrive through `finish --results` under the key `run`, and a pending review there
   still fails the run. `"scope": "phase"` keeps a review in every phase gate. Existing manifests
   whose review has no `scope` move to run review; the inferred manifest writes `"scope": "run"`.

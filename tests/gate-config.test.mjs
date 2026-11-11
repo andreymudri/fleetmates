@@ -377,6 +377,25 @@ test('checksForRun uses phases.run when declared, with the same lens and protect
   assert.equal(checks[2].injected, undefined)
 })
 
+// A declared `phases.run` replaces the derived commands, never a review another block asked for:
+// `checksForPhase` has already taken that review off every phase gate, so a run list without it
+// would leave it in no gate at all, neither pending nor failed.
+test('checksForRun keeps a run-scoped review the declared phases.run does not list', () => {
+  const config = { phases: {
+    default: { checks: [{ name: 'test', kind: 'command', run: 'x' }, runReview] },
+    run: { checks: [{ name: 'smoke', kind: 'command', run: 'y' }] },
+  } }
+  assert.deepEqual(checksForPhase(config, '1').map((c) => c.name), ['test', 'fileset', 'ownership'])
+  assert.deepEqual(checksForRun(config).map((c) => [c.name, c.kind]), [['smoke', 'command'], ['review', 'agent'], ['fileset-run', 'fileset-run']])
+})
+
+// A solo gate has no run entry and no `finish` after it, so it is the only gate a review can be in.
+test('checksForPhase keeps a run-scoped review when the gate is solo', () => {
+  const config = { phases: { default: { checks: [{ name: 'test', kind: 'command', run: 'x' }, runReview] } } }
+  assert.deepEqual(checksForPhase(config, 'default').map((c) => c.name), ['test', 'fileset', 'ownership'])
+  assert.deepEqual(checksForPhase(config, 'default', { solo: true }).map((c) => c.name), ['test', 'review', 'fileset', 'ownership'])
+})
+
 test('checksForRun injects fileset-run into a declared phases.run that lacks it, under a free name', () => {
   const checks = checksForRun({ phases: { run: { checks: [{ name: 'fileset-run', kind: 'command', run: 'x' }] } } })
   assert.deepEqual(checks.map((c) => [c.name, c.kind, c.injected]), [['fileset-run', 'command', undefined], ['fileset-run:injected', 'fileset-run', true]])

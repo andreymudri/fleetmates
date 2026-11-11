@@ -200,8 +200,8 @@ export function hasRunEntry(config) {
   return phaseBlocks(config).some((block) => Array.isArray(block.checks) && block.checks.some(runScopedReview))
 }
 
-// The checks of the run entry. `phases.run.checks` when declared. Otherwise the `default` block's
-// `command` checks, then every run-scoped review (from `default`, then from the named phases, the
+// The checks of the run entry. `phases.run.checks` when declared, otherwise the `default` block's
+// `command` checks; in both cases followed by every run-scoped review the list does not already name (from `default`, then from the named phases, the
 // first of each name only: results are keyed by name), then the computed `fileset-run`. `fileset`,
 // `ownership` and phase-scoped reviews stay on the phase gates. The lens fallback and the
 // `protected` and `skips` overwrites are `checksForPhase`'s, and `fileset-run` is injected into a
@@ -209,22 +209,23 @@ export function hasRunEntry(config) {
 export function checksForRun(config) {
   const rules = normalizeRules(config)
   const declared = config?.phases?.[RUN_PHASE]?.checks
-  let checks
-  if (Array.isArray(declared)) {
-    checks = declared
-  } else {
-    const commands = (config?.phases?.default?.checks ?? []).filter((check) => check?.kind === 'command')
-    const reviews = []
-    const seen = new Set()
-    for (const block of phaseBlocks(config)) {
-      for (const check of Array.isArray(block.checks) ? block.checks : []) {
-        if (!runScopedReview(check) || seen.has(check.name)) continue
-        seen.add(check.name)
-        reviews.push(check)
-      }
+  const isDeclared = Array.isArray(declared)
+  const base = isDeclared
+    ? declared
+    : (config?.phases?.default?.checks ?? []).filter((check) => check?.kind === 'command')
+  // A declared list replaces the derived commands, never a review: `checksForPhase` has already
+  // taken every run-scoped review off the phase gates, so one the declared list does not name
+  // would be in no gate at all, neither pending nor failed. It is appended instead.
+  const reviews = []
+  const seen = new Set(isDeclared ? declared.map((check) => check?.name) : [])
+  for (const block of phaseBlocks(config)) {
+    for (const check of Array.isArray(block.checks) ? block.checks : []) {
+      if (!runScopedReview(check) || seen.has(check.name)) continue
+      seen.add(check.name)
+      reviews.push(check)
     }
-    checks = [...commands, ...reviews]
   }
+  const checks = [...base, ...reviews]
   return injectMissing(checks.map((check) => normalizeCheck(check, rules)), RUN_CHECK_KINDS, rules.guarded)
 }
 
@@ -245,9 +246,12 @@ export function checksForRun(config) {
 // A run-scoped review (`reviewScope`) is left out: `finish` carries it in the run entry
 // (`checksForRun`). Leaving it out shifts the list position of every later entry, and a malformed
 // entry is reported by that position, so after a run-scoped review the reported number is one low.
-export function checksForPhase(config, phaseName) {
+//
+// `solo` is the `gate --no-fleet` caller: no run entry and no `finish` follow a solo gate, so it is
+// the only gate a review can be in, and a run-scoped review stays in its list.
+export function checksForPhase(config, phaseName, { solo = false } = {}) {
   const phases = config?.phases ?? {}
-  const checks = (phases[phaseName]?.checks ?? phases.default?.checks ?? []).filter((check) => !runScopedReview(check))
+  const checks = (phases[phaseName]?.checks ?? phases.default?.checks ?? []).filter((check) => solo || !runScopedReview(check))
   const rules = normalizeRules(config)
   return injectMissing(checks.map((check) => normalizeCheck(check, rules)), ENFORCEMENT_CHECK_KINDS, rules.guarded)
 }
