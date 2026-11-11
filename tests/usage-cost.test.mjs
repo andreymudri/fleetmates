@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -202,4 +202,19 @@ test('harnesses.<name>.limitWaitMinutes accepts 0 to 1440 and defaults to 60 in 
   assert.equal(validateKey('harnesses.opencode.limitWaitMinutes', 30), 30)
   assert.equal(harnessSettings({ harnesses: {} }, 'opencode', 'files').limitWaitMinutes, 60)
   assert.equal(harnessSettings({ harnesses: { opencode: { limitWaitMinutes: 0 } } }, 'opencode', 'files').limitWaitMinutes, 0)
+})
+
+// `harnessSettings` and the driver are each tested alone, and nothing ran the line between them: a
+// setting dropped there falls back to the driver's own default without a word, so a configured
+// `limitWaitMinutes: 0` would still wait an hour. Every name `dispatch` takes from the settings
+// has to be handed to `dispatchPhase`.
+test('dispatch hands every harness setting it reads to dispatchPhase', async () => {
+  const source = await readFile(new URL('../scripts/cli.mjs', import.meta.url), 'utf8')
+  const taken = /const \{ ([^}]+) \} = harnessSettings\(resolved, adapter\.name, adapter\.defaultSandbox\)/.exec(source)
+  assert.ok(taken, 'the dispatch command destructures harnessSettings')
+  const names = taken[1].split(',').map((name) => name.trim())
+  assert.ok(names.includes('limitWaitMinutes') && names.includes('timeoutMinutes'))
+  const call = source.slice(source.indexOf('await dispatchPhase({', taken.index))
+  const args = call.slice(0, call.indexOf('\n    })'))
+  for (const name of names) assert.match(args, new RegExp(`^      ${name},$`, 'm'), `${name} reaches dispatchPhase`)
 })

@@ -4604,6 +4604,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const baseBranch = flags.base === true
       ? ''
       : (flags.base ?? await resolveBaseBranch(createGit({ cwd: root }), undefined).catch(() => ''))
+    const baseDerived = flags.base === undefined && baseBranch !== ''
 
     const contextAnchor = {}
     const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
@@ -4727,6 +4728,10 @@ export async function runCli(argv, io = { out: console.log }) {
       ? ` in ${batches.length} batch${batches.length === 1 ? '' : 'es'}: ${batches.map((b) => b.map((t) => printable(t.id)).join('+')).join(', ')}`
       : ''
     io.out(`workflow for run ${printable(runId)}, phase ${phase}: ${phaseTasks.length} task${phaseTasks.length === 1 ? '' : 's'}${batched}`)
+    // A derived base is a guess (the one of main/master that exists) written into every brief as
+    // the task's checkout start point. It is wrong for a run cut from any other branch, and with
+    // `--out` nobody reads the briefs, so it is named here. The name is one of two literals.
+    if (baseDerived) io.out(`base ${baseBranch} was derived, not passed: pass --base if this run was cut from another branch`)
     return 0
   }
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `workflow --out` prints a third line when it derived the base branch itself, naming the branch
+  and saying to pass `--base` if the run was cut from another one. The derived base is written
+  into every brief as the task's checkout start point, and with `--out` nobody reads the briefs.
+
+### Fixed
+
+- A teammate whose resume fails after a provider-limit wait is orphaned without a stale
+  `resumeAt` in its session record. The resume time is dropped as soon as the wait ends.
+
 ## v2.9.0
 
 An A/B eval on 5 FeatureBench tasks found the same quality with and without the plugin, while the
