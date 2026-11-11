@@ -18,7 +18,7 @@ the copy it loaded.
 - **Zero dependencies.** Runtime and dev, both. Tests use the built-in `node:test` runner. A
   change that needs a package almost certainly needs a different design.
 - **Node >= 24.2.0.**
-- Run `npm test` before opening a pull request. It should be 683 passing, 0 failing.
+- Run `npm test` before opening a pull request. It should be 4077 passing, 0 failing.
 - Commit messages: single line, commitlint style, English.
 
 ## Running the tests

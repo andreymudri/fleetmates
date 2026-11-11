@@ -589,3 +589,56 @@ test('the reviewer reports a finding it could not reproduce as unreproduced', as
     'the reviewer reproduction bullet must hold exactly its claim, consequence, and its one allow-listed sentence',
   )
 })
+
+// Batched implementers (docs/specs/2026-11-06-cost-cuts-design.md, section 5). The contract now
+// admits a batch, so what a batch keeps per task and what it costs are pinned as one block each:
+// the per-task sequence with its never-from-the-previous-branch rule, and the three limits.
+test('the implementer contract admits one task or a batch done in sequence, each on its own branch', async () => {
+  const { fields, doc } = await agent('tm-implementer.md')
+  assert.match(fields.description, /one planned task, or a batch of same-tier tasks in sequence each on its own branch/)
+  assertStatement(
+    doc,
+    /^You implement one task from a teammates run, or a batch of tasks done in sequence, each on its own branch\.$/,
+    'the opening must admit a batch and say each task has its own branch',
+  )
+  assertStatement(doc, /Every rule below applies to each task of a batch as it would to a task dispatched alone/)
+})
+
+test('the implementer does each task of a batch from the base, with its own locate, commits and complete', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  const section = doc.section('Batches')
+  const hit = assertClaim(section, {
+    label: 'per-task checkout from the base',
+    claim: /Each task starts with its own git checkout -B fleetmates\/<runId>\/<taskId> <base branch>, always from the base branch and never from the previous task's branch, followed by its own locate, its own commits and its own complete; only then does the next task start\./,
+    then: /^Before each next checkout, git status --porcelain must print nothing, because an uncommitted file rides the checkout onto the next task's branch and fails that task's file set\.$/,
+    subject: /previous task|checkout/i,
+    allow: [/^Before each next checkout/],
+  })
+  assertBlockStatementCount(hit, 4, 'the per-task sequence paragraph')
+})
+
+test('the implementer contract states the three limits of a batch', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  const section = doc.section('Batches')
+  const hit = assertClaim(section, {
+    label: 'batch limits',
+    claim: /^A batch has three limits\.$/,
+    then: /^Its tasks run one after another, so a batch takes as long as all of its tasks together\.$/,
+  })
+  assertBlockStatementCount(hit, 4, 'the limits paragraph')
+  assertClaim(section, {
+    label: 'the hook sees the latest located task',
+    claim: /^The SubagentStop hook finds you through the location record of this worktree, which names the latest task you ran locate for, so a stop is checked against that task only\.$/,
+    then: /^If you stop before the last task, every later task of the batch has no result and is reported orphaned\.$/,
+  })
+})
+
+test('the implementer returns one result per task of a batch, each with its taskId', async () => {
+  const { doc } = await agent('tm-implementer.md')
+  const section = doc.section('Return value')
+  assertStatement(
+    section,
+    /^For a batch, return results: an array with exactly one such object per task, in the brief's order, each also carrying taskId\.$/,
+    'the batch return shape must match what the generated Workflow flattens',
+  )
+})

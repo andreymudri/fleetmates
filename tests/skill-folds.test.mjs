@@ -1,8 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readSkill } from './md-contract.mjs'
 
-const read = async (name) => readFile(new URL(`../skills/${name}/SKILL.md`, import.meta.url), 'utf8')
+// Every file of the skill, SKILL.md first and then reference/*.md in name order.
+const read = async (name) => (await readSkill(name)).raw
 
 test('parallel-execution absorbs subagent-driven development: fresh agent per task, review between tasks', async () => {
   const b = await read('parallel-execution')

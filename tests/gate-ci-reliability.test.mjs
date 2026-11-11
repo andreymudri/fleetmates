@@ -238,7 +238,7 @@ test('protectedPaths includes the quarantine file', () => {
 })
 
 const manifest = (lens) => ({
-  phases: { default: { checks: [{ name: 'review', kind: 'agent', ...(lens ? { lens } : {}) }] } },
+  phases: { default: { checks: [{ name: 'review', kind: 'agent', scope: 'phase', ...(lens ? { lens } : {}) }] } },
 })
 
 test('reviewLenses adds portability when the CI covers macOS or Windows', () => {

@@ -172,7 +172,7 @@ async function fixture(t, { review = false, command = nodeCommand('const fs=requ
   await writeFile(path.join(root, 'plan.md'), files.map((file, i) => `### Task ${i + 1}: task\n\n**Files:**\n- Create: \`${file}\`\n`).join('\n'))
   const checks = [{ name: 'behavior', kind: 'command', run: command }]
   if (report) checks[0].report = report
-  if (review) checks.push({ name: 'review', kind: 'agent', agent: 'tm-reviewer' })
+  if (review) checks.push({ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase' })
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks } } }))
   git(root, 'add', '.')
   git(root, 'commit', '-m', 'test: anchor')

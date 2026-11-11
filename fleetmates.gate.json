@@ -13,6 +13,7 @@
           "name": "review",
           "kind": "agent",
           "agent": "tm-reviewer",
+          "scope": "run",
           "lens": ["correctness", "security", "tests", "claims"],
           "blockOn": ["high"]
         }
@@ -30,6 +31,7 @@
           "name": "review",
           "kind": "agent",
           "agent": "tm-reviewer",
+          "scope": "run",
           "lens": ["correctness", "security", "tests"],
           "blockOn": ["high"]
         }

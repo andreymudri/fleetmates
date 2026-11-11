@@ -22,14 +22,16 @@ Teammates run as Claude Code subagents, or headless through the Codex CLI or the
 - **Parallel teammates in isolated worktrees.** Each task gets its own git worktree and branch, so
   teammates in the same phase never edit the same checkout.
 - **A phase gate computed from git.** Merge, test, fileset and ownership checks run on the merged
-  tree, plus any command, agent or MCP checks the manifest declares. Nothing an agent wrote under
+  tree, plus any command or MCP checks the manifest declares. Nothing an agent wrote under
   `.fleetmates/` decides a verdict.
 - **Declared file sets.** A task may change only the files its plan lists. A change outside them
   fails `fileset` and names the path.
 - **Fix rounds with a budget.** After a failed gate, `fix` decides whether to retry, escalate or do
   nothing, within the phase's `fixRounds` budget.
 - **Review lenses.** Reviewers run one lens each (for example correctness, security, tests or
-  `claims`), and the manifest decides which severities block.
+  `claims`), and the manifest decides which severities block. By default they review the run once,
+  on its integrated diff; a review check with `"scope": "phase"` reviews inside each phase gate
+  instead.
 - **Codex and Cursor harnesses.** The same plan, gate and result contract, dispatched headless
   through the Codex CLI or the Cursor CLI.
 - **A local deck.** An optional web UI in `hub/` shows which session needs you and mirrors the
@@ -81,10 +83,11 @@ exactly what each one does and how to turn the update check off.
 
 ```
 phase 1   T1  T2  T3        3 worktrees, in parallel
-  gate    merge · test · fileset · ownership · review
+  gate    merge · test · fileset · ownership
 phase 2   T4
   gate    ...
           -> merged to the run branch
+run       test · review · fileset-run    once, on the integrated diff
 ```
 
 1. **Plan.** Each task in the plan declares the files it may touch (`**Files:**`) and the tasks it
@@ -95,7 +98,8 @@ phase 2   T4
    branch `fleetmates/<run>/<task>`.
 4. **Gate.** When the phase finishes, the gate merges its branches into a scratch worktree and runs
    its checks there. Only on PASS does the integrator merge the branches into the run branch.
-5. **Land.** `finish` recomputes the verdict of every phase before the run branch lands.
+5. **Land.** `finish` recomputes the verdict of every phase, then the run entry: the review, once,
+   on the run's integrated diff. Only then does the run branch land.
 
 The GIF above walks through one such run, including a gate that catches a file changed outside its
 declared set.
@@ -184,8 +188,9 @@ Seeing what is actually there:
 Reviews:
 
 - `review-dispatch --run <id>` — generate the reviewer dispatches from the manifest, with the tier,
-  findings path and scratch worktree already resolved
-- `collect-reviews --run <id>` — rebuild a `gate --results` file from the reviewers' findings drops
+  findings path and scratch worktree already resolved; `--phase run` reviews the integrated run
+- `collect-reviews --run <id>` — rebuild a `gate --results` file from the reviewers' findings drops;
+  with `--phase run`, a `finish --results` file carrying the `run` entry
 
 How reviewers check the task specification, how the instruction security lint works, and how
 the `claims` lens probes claims by mutation are covered in [docs/reference/reviews.md](docs/reference/reviews.md).
@@ -243,6 +248,7 @@ and nothing else:
 | Key | Domain | Default |
 |---|---|---|
 | `maxParallel` | integer >= 1 | `max(1, min(8, cores - 2))` |
+| `batchSize` | integer >= 1: same-tier tasks one implementer does in sequence, each on its own branch | `3`; `1` is one teammate per task |
 | `caveman` | `false \| "lite" \| "full" \| "ultra"` | `false` |
 | `agents.<role>.tier` | `"cheap" \| "mid" \| "capable"` | unset — see below |
 | `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits the session's |

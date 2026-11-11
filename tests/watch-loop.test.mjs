@@ -67,7 +67,7 @@ test('a task stalled on every tick climbs resume, resume, respawn, resume, resum
     ladder.map((e) => e.at),
     [0, 20, 40, 60, 80, 100].map((m) => new Date(BASE + m * MINUTE).toISOString()),
   )
-  assert.deepEqual(events.at(-1), { event: 'exit', reason: 'phase-idle' })
+  assert.equal(events.at(-1).event, 'orphan', 'the phase going idle ends the loop without an event of its own')
   assert.equal(actions.length, 6, 'onAction runs once per non-none action and never for a silent tick')
   assert.deepEqual(actions.map(([id]) => id), ['t1', 't1', 't1', 't1', 't1', 't1'])
   assert.deepEqual(actions.map(([, action]) => action), ['resume', 'resume', 'respawn', 'resume', 'resume', 'orphan'])
@@ -91,10 +91,12 @@ test('a task orphaned earlier produces no further events', async () => {
     config: spacedConfig,
   })
   assert.equal(code, 0)
-  assert.deepEqual(events, [{ event: 'exit', reason: 'phase-idle' }])
+  assert.deepEqual(events, [])
 })
 
-test('a tick that reports the phase is no longer in flight exits 0 with phase-idle', async () => {
+// Only actionable events are printed: the phase going idle wakes nobody, and the caller reads the
+// exit code (docs/specs/2026-11-06-cost-cuts-design.md, section 3).
+test('a tick that reports the phase is no longer in flight exits 0 without emitting an event', async () => {
   const clock = fakeClock()
   const events = []
   let tickCalls = 0
@@ -109,7 +111,7 @@ test('a tick that reports the phase is no longer in flight exits 0 with phase-id
   })
   assert.equal(code, 0)
   assert.equal(tickCalls, 1)
-  assert.deepEqual(events, [{ event: 'exit', reason: 'phase-idle' }])
+  assert.deepEqual(events, [])
 })
 
 test('three consecutive tick failures emit three watch-error events then exit errors with code 1', async () => {
@@ -156,9 +158,8 @@ test('two failures then a success reset the failure count', async () => {
   assert.equal(code, 0)
   assert.deepEqual(
     events.map((e) => e.event),
-    ['watch-error', 'watch-error', 'watch-error', 'watch-error', 'exit'],
+    ['watch-error', 'watch-error', 'watch-error', 'watch-error'],
   )
-  assert.deepEqual(events.at(-1), { event: 'exit', reason: 'phase-idle' })
 })
 
 test('state.save receives the history after every successful tick', async () => {
@@ -224,8 +225,9 @@ test('onAction is awaited for each non-none action with the task id and decision
       log.push(`action ${taskId} ${decision.action} ${decision.attempt}`)
     },
   })
-  // `a` is stalled and `b` is working: only `a` produces an event and an action.
-  assert.deepEqual(log, ['emit resume a', 'action a resume 1', 'emit exit undefined'])
+  // `a` is stalled and `b` is working: only `a` produces an event and an action. The idle phase
+  // that ends the loop emits nothing, so an unawaited action would be missing when it returns.
+  assert.deepEqual(log, ['emit resume a', 'action a resume 1'])
 })
 
 test('a task id with a clear-screen CSI and a C1 CSI byte is emitted with neither raw byte', async () => {

@@ -155,14 +155,13 @@ test('watch --once resumes the stalled task only, records it, and a second pass 
   })
 })
 
-test('watch --once exits phase-idle when every phase task is done', async () => {
+test('watch --once exits 0 with no exit event when every phase task is done', async () => {
   await withRun(async ({ root, io, lines, g }) => {
     await stalledAndWorking(root, g)
     await setStates(root, { T1: 'done', T2: 'done' })
     assert.equal(await watchOnce(root, io), 0)
     const out = events(lines)
-    assert.deepEqual(out.at(-1), { event: 'exit', reason: 'phase-idle' })
-    assert.equal(out.some((e) => e.event === 'resume'), false)
+    assert.deepEqual(out, [{ event: 'start', staleMinutes: 20, learned: false, samples: 0 }], 'the idle phase prints nothing after the start line')
   })
 })
 
@@ -266,14 +265,14 @@ test('a task that finished without the watchdog acting adds exactly one envelope
   })
 })
 
-test('the last task of a phase is sampled even though the watch exits phase-idle', async () => {
+test('the last task of a phase is sampled even though the watch exits on the idle phase', async () => {
   await withRun(async ({ root, io, lines, g }) => {
     await taskBranch(root, g, 'T1', 'a.mjs')
     await taskBranch(root, g, 'T2', 'b.mjs')
     await setStates(root, { T1: 'done', T2: 'done' })
     await writeFile(path.join(root, '.fleetmates', 'r1', 'watch.json'), JSON.stringify({ T1: HISTORY }), 'utf8')
     assert.equal(await watchOnce(root, io), 0)
-    assert.deepEqual(events(lines).at(-1), { event: 'exit', reason: 'phase-idle' })
+    assert.equal(events(lines).some((e) => e.event === 'exit'), false)
     assert.deepEqual(JSON.parse(await readFile(envelopeFile(root), 'utf8')).samplesMs, [300000])
     assert.equal((await watchJson(root)).T1.sampled, true)
   })

@@ -76,7 +76,7 @@ test('review dispatch resolves anchored contracts on an explicit feature base in
   git(['add', '.'], root); git(['commit', '-m', 'baseline'], root)
   git(['switch', '-c', 'feat/deck'], root)
   await writeFile(path.join(root, 'plan.md'), markdown)
-  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', blockOn: ['high'], lens: ['correctness'] }] } } }))
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [{ name: 'review', kind: 'agent', agent: 'tm-reviewer', scope: 'phase', blockOn: ['high'], lens: ['correctness'] }] } } }))
   git(['add', '.'], root); git(['commit', '-m', 'feature plan'], root)
   git(['switch', '-c', 'run'], root)
   git(['switch', '-c', 'fleetmates/r1/T2'], root)

@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { parsePlan } from './plan-parser.mjs'
 import { assignPhases } from './phases.mjs'
-import { checksForPhase, fixRoundsForPhase } from './gate-config.mjs'
+import { checksForPhase, checksForRun, fixRoundsForPhase, hasRunEntry, RUN_PHASE } from './gate-config.mjs'
+import { RUN_FIX_ROUND_CAP } from './fix-loop.mjs'
 import { evidenceIdentity } from './workflow-evidence.mjs'
 import { RESULT_SCHEMA, validateResult } from './result-schema.mjs'
 import { NAMES } from './names.mjs'
@@ -58,26 +59,56 @@ export function expandWorkflowProfile({ profile, runId, planPath, baseBranch, ha
   const steps = [{ id: 'prepare', kind: 'deterministic', argv: cli('init-run', planPath, ...common),
     inputs: ['tracked-plan'], outputs: ['run-plan'], effects: ['local-run-state'] },
   { id: 'baseline', kind: 'deterministic', argv: cli('preview-check'), inputs: ['tracked-manifest'], outputs: ['baseline-report'], effects: ['project-verifier-execution'] }]
+  // A mandatory review (an `agent` check that is not optional) is required for the run or for
+  // every phase. A run-scoped one is reviewed once, by `review-run` and `collect-run` after the last
+  // integration; a phase keeps its own review and collect steps exactly when its gate still carries
+  // a mandatory review (`scope: "phase"`), so a phase-scoped manifest expands as it always did.
+  const mandatoryReview = checks => checks.some(c => c.kind === 'agent' && c.optional !== true)
+  const runChecks = hasRunEntry(manifest) ? checksForRun(manifest) : null
+  const runReview = runChecks !== null && mandatoryReview(runChecks)
+  const phaseChecks = new Map(phases.map(phase => [phase, checksForPhase(manifest, String(phase))]))
+  if (!runReview) {
+    const unreviewed = phases.filter(phase => !mandatoryReview(phaseChecks.get(phase)))
+    if (runChecks !== null && unreviewed.length === phases.length) blocked.push('the run requires a tracked mandatory review check, or every phase one')
+    else for (const phase of unreviewed) blocked.push(`phase ${phase} requires a tracked mandatory review check`)
+  }
   const phaseContracts = phases.map((phase, index) => {
-    const checks = checksForPhase(manifest, String(phase))
-    if (!checks.some(c => c.kind === 'agent' && c.optional !== true)) blocked.push(`phase ${phase} requires a tracked mandatory review check`)
+    const checks = phaseChecks.get(phase)
+    const reviewed = mandatoryReview(checks)
     const phaseArgs = [...common, '--phase', String(phase)]
     // collect-reviews writes this exact path and names it on its success line; it is not stdout.
     const reviewResults = `${NAMES.stateDir}/${runId}/reviews/results-${phase}.json`
+    // A phase with no review of its own while the run is reviewed has none of these steps; without
+    // a run review the steps stay, and the phase is blocked above.
+    const own = reviewed || !runReview
     steps.push({ id: `implement-${phase}`, kind: 'agent', argv: cli('dispatch', ...phaseArgs, '--harness', harness, ...planArgs, ...contractArgs), inputs: ['run-plan', 'baseline-report', ...(index ? [`integrated-refs-${phases[index - 1]}`] : [])], outputs: [`task-results-${phase}`], effects: ['isolated-checkouts', 'local-session-records'] },
-      { id: `review-${phase}`, kind: 'agent', argv: cli('dispatch-reviews', ...phaseArgs, '--harness', harness, ...planArgs, ...contractArgs), inputs: [`task-results-${phase}`], outputs: [`finding-drops-${phase}`], effects: ['scratch-checkouts', 'local-review-records'] },
-      { id: `collect-${phase}`, kind: 'deterministic', argv: cli('collect-reviews', ...phaseArgs), inputs: [`finding-drops-${phase}`], outputs: [`review-results-${phase}`], resultsPath: reviewResults, resultsFrom: 'success-write-line', effects: ['local-review-results'] },
-      { id: `gate-${phase}`, kind: 'deterministic', argv: cli('gate', ...phaseArgs, ...planArgs, '--results', reviewResults), inputs: [`review-results-${phase}`], outputs: [`gate-verdict-${phase}`], effects: ['preview-checkouts', 'project-verifier-execution', 'local-gate-records'] },
+      ...(own ? [{ id: `review-${phase}`, kind: 'agent', argv: cli('dispatch-reviews', ...phaseArgs, '--harness', harness, ...planArgs, ...contractArgs), inputs: [`task-results-${phase}`], outputs: [`finding-drops-${phase}`], effects: ['scratch-checkouts', 'local-review-records'] },
+        { id: `collect-${phase}`, kind: 'deterministic', argv: cli('collect-reviews', ...phaseArgs), inputs: [`finding-drops-${phase}`], outputs: [`review-results-${phase}`], resultsPath: reviewResults, resultsFrom: 'success-write-line', effects: ['local-review-results'] },
+        { id: `gate-${phase}`, kind: 'deterministic', argv: cli('gate', ...phaseArgs, ...planArgs, '--results', reviewResults), inputs: [`review-results-${phase}`], outputs: [`gate-verdict-${phase}`], effects: ['preview-checkouts', 'project-verifier-execution', 'local-gate-records'] }]
+        : [{ id: `gate-${phase}`, kind: 'deterministic', argv: cli('gate', ...phaseArgs, ...planArgs), inputs: [`task-results-${phase}`], outputs: [`gate-verdict-${phase}`], effects: ['preview-checkouts', 'project-verifier-execution', 'local-gate-records'] }]),
       integration === 'host-bounded'
-        ? { id: `integrate-${phase}`, kind: 'host-integration', mode: 'host-bounded', inputs: [`gate-verdict-${phase}`, `review-results-${phase}`], outputs: [`integrated-refs-${phase}`], effects: ['host-bounded-local-merges'] }
+        ? { id: `integrate-${phase}`, kind: 'host-integration', mode: 'host-bounded', inputs: [`gate-verdict-${phase}`, ...(own ? [`review-results-${phase}`] : [])], outputs: [`integrated-refs-${phase}`], effects: ['host-bounded-local-merges'] }
         : { id: `integrate-${phase}`, kind: 'agent', argv: cli('dispatch-integrator', ...phaseArgs, '--harness', harness, ...planArgs), inputs: [`gate-verdict-${phase}`], outputs: [`integrated-refs-${phase}`], effects: ['authorized-integration-refs'] })
     return { phase, tasks: tasks.filter(task => task.phase === phase).map(task => ({ id: task.id, files: task.files, deps: task.deps })), checks,
       repair: { maxRounds: Math.min(maxRepairRounds, fixRoundsForPhase(manifest, String(phase))), decision: 'existing-fix-contract', stop: ['process-violation', 'budget-exhausted', 'unknown-environment-failure'] } }
   })
+  const runResults = `${NAMES.stateDir}/${runId}/reviews/results-${RUN_PHASE}.json`
+  if (runReview) {
+    const runArgs = [...common, '--phase', RUN_PHASE]
+    steps.push({ id: `review-${RUN_PHASE}`, kind: 'agent', argv: cli('dispatch-reviews', ...runArgs, '--harness', harness, ...planArgs, ...contractArgs), inputs: [`integrated-refs-${phases.at(-1)}`], outputs: [`finding-drops-${RUN_PHASE}`], effects: ['scratch-checkouts', 'local-review-records'] },
+      { id: `collect-${RUN_PHASE}`, kind: 'deterministic', argv: cli('collect-reviews', ...runArgs), inputs: [`finding-drops-${RUN_PHASE}`], outputs: [`review-results-${RUN_PHASE}`], resultsPath: runResults, resultsFrom: 'success-write-line', effects: ['local-review-results'] })
+  }
+  const phaseReviewed = phases.some(phase => steps.some(s => s.id === `review-${phase}`))
+  const finishResults = integration === 'host-bounded' ? [`${NAMES.stateDir}/${runId}/reviews/finish-results.json`] : runReview ? [runResults] : []
   steps.push({ id: 'acceptance', kind: 'judgment-or-human', inputs: [...PROFILES[profile], `integrated-refs-${phases.at(-1)}`], outputs: ['acceptance-evidence'], effects: [] },
-    { id: 'finish', kind: 'deterministic', argv: cli('finish', ...common, ...planArgs, ...(integration === 'host-bounded' ? ['--results', `${NAMES.stateDir}/${runId}/reviews/finish-results.json`] : [])), inputs: ['acceptance-evidence', 'current-review-evidence-for-all-phases'], outputs: ['completion-report'], effects: ['complete-project-verifier-execution'] })
+    { id: 'finish', kind: 'deterministic', argv: cli('finish', ...common, ...planArgs, ...finishResults.flatMap(file => ['--results', file])),
+      inputs: ['acceptance-evidence', ...(runReview ? [...(phaseReviewed ? ['current-review-evidence-for-all-phases'] : []), `review-results-${RUN_PHASE}`] : ['current-review-evidence-for-all-phases'])], outputs: ['completion-report'], effects: ['complete-project-verifier-execution'] })
+  // The run entry `finish` computes, and its repair bound: the fix route for run findings is capped
+  // at RUN_FIX_ROUND_CAP rounds whatever the request or the manifest allows.
+  const runContract = runChecks === null ? {} : { runContract: { checks: runChecks,
+    repair: { maxRounds: Math.min(maxRepairRounds, fixRoundsForPhase(manifest, RUN_PHASE), RUN_FIX_ROUND_CAP), decision: 'existing-fix-contract', stop: ['process-violation', 'budget-exhausted', 'undeclared-path'] } } }
   const result = { version: 1, profile, mode: 'dry-run', executable: false, ready: blocked.length === 0, blocked, identity,
-    parameters, capabilities, maxWallMinutes, integration, contracts, phaseContracts, steps,
+    parameters, capabilities, maxWallMinutes, integration, contracts, phaseContracts, ...runContract, steps,
     outputContracts: { taskResult: RESULT_SCHEMA, gate: ['verdict', 'anchorSha', 'planHash', 'branchShas'], dependencyRule: 'validated artifacts and actual gates; free-text done is not delivery evidence' },
     limits: ['No commands are executed, publication is absent, and declared capabilities do not grant permissions.',
       'Execution belongs to workflow-controller, which revalidates this expansion and probes capabilities itself; this object authorizes nothing.',

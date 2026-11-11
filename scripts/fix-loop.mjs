@@ -1,9 +1,10 @@
 import { escalateTier, TIERS } from './routing.mjs'
-import { normalizePath } from './enforce.mjs'
+import { normalizePath, taskBranchName } from './enforce.mjs'
 
 // A fileset or ownership failure is a process violation, not a code defect. Retrying it would
 // apply optimisation pressure toward widening the plan's file set, which phase-gate forbids.
-const PROCESS_KINDS = new Set(['fileset', 'ownership', 'inventory'])
+// `fileset-run` is the run entry's fileset, and is the same kind of fact.
+const PROCESS_KINDS = new Set(['fileset', 'ownership', 'inventory', 'fileset-run'])
 
 const DEFAULT_FIX_ROUNDS = 2
 
@@ -64,19 +65,26 @@ function declaredMatch(declared, candidate) {
 // own declared write set either wastes the round or pushes T1 to widen its fileset and fail the
 // next gate. The longest declared path that matches is the one that actually owns the file.
 function ownerOf(tasks, reported) {
+  return declarationOf(tasks, reported)?.task ?? null
+}
+
+// The task AND the declared path it matched, by the same longest-match rule: the run fix route
+// names the declared path (the plan's spelling) in its file set, never the reviewer's report.
+function declarationOf(tasks, reported) {
+  if (typeof reported !== 'string' || reported === '') return null
   const candidate = normalizePath(reported)
-  let owner = null
+  let found = null
   let best = 0
   for (const task of tasks) {
     for (const declared of asArray(task.files)) {
       const score = declaredMatch(declared, candidate)
       if (score > best) {
         best = score
-        owner = task
+        found = { task, path: normalizePath(declared) }
       }
     }
   }
-  return owner
+  return found
 }
 
 const REGEX_META = /[.*+?^${}()|[\]\\]/g
@@ -100,6 +108,22 @@ function mentionEnds(output, declared) {
   const ends = []
   for (const match of output.matchAll(re)) ends.push(match.index + match[0].length)
   return ends
+}
+
+// The declared paths a command check's output names, longest path at each offset, with the
+// tasks that declare them. `attribute` below applies the same rule and keeps only the task ids.
+function mentionedDeclarations(output, tasks) {
+  const byEnd = new Map()
+  for (const task of tasks) {
+    for (const declared of asArray(task.files)) {
+      const declaredPath = normalizePath(declared)
+      for (const end of mentionEnds(output, declared)) {
+        const current = byEnd.get(end)
+        if (!current || declaredPath.length > current.path.length) byEnd.set(end, { task, path: declaredPath })
+      }
+    }
+  }
+  return [...byEnd.values()]
 }
 
 function attribute(check, tasks) {
@@ -217,4 +241,93 @@ export function decideFix(verdict, phase, tasks, rounds, config) {
     return { taskId: id, tier, round: roundsFor(phaseRounds, id) + 1, checks }
   })
   return { decision: 'retry', tasks: retries, reason: null }
+}
+
+// THE RUN FIX ROUTE. The run entry (`finish`'s `run`, reviewed once on the integrated diff) is no
+// one task's work, so a blocking finding there is not retried on a task branch: it becomes ONE fix
+// task, `fix-<n>`, on the branch `fleetmates/<run>/fix-<n>` cut from the run tip, whose file set is
+// the paths the blocking findings cite that some plan task declares. `tm-integrator` merges it
+// with --no-ff like any task branch, and the gates see only paths the plan declares
+// (`fileset-run`, and `ownership`'s run-fix rule in scripts/gate-runner.mjs).
+//
+// The round budget is `fixRounds` (the manifest's `phases.run`, else `phases.default`), capped at
+// RUN_FIX_ROUND_CAP. Rounds are counted from `rounds`, the run's `{ 'fix-<n>': count }` map that
+// `record-fix-round --phase run` writes: run state, which decides only how many retries are left,
+// never what the verdict says.
+export const RUN_FIX_ROUND_CAP = 2
+const RUN_FIX_ID = /^fix-[1-9][0-9]*$/
+
+export function runFixRoundsUsed(rounds) {
+  if (rounds === null || typeof rounds !== 'object') return 0
+  return Object.keys(rounds).filter((id) => RUN_FIX_ID.test(id)).reduce((n, id) => n + roundsFor(rounds, id), 0)
+}
+
+function highestTier(tasks) {
+  let index = 0
+  for (const task of tasks) index = Math.max(index, TIERS.indexOf(safeTier(task?.tier)))
+  return TIERS[index]
+}
+
+// `blockOn` maps a review check's name to its blocking severities (the manifest's `blockOn`,
+// default high): the agent result carries only `status`, so which of its findings blocked is
+// recomputed here from the same rule `collect-reviews` applied.
+export function decideRunFix(verdict, { runId, tasks = [], rounds = {}, fixRounds = RUN_FIX_ROUND_CAP, blockOn = {} } = {}) {
+  const raw = verdict?.results
+  if (raw !== null && raw !== undefined && !Array.isArray(raw)) {
+    return { decision: 'escalate', tasks: [], reason: 'malformed-verdict', check: null }
+  }
+  const results = asArray(raw)
+  const planTasks = asArray(tasks)
+
+  const violation = results.find((check) => PROCESS_KINDS.has(check?.kind) && !CLEAR.has(check?.status))
+  if (violation) return { decision: 'escalate', tasks: [], reason: 'process-violation', check: violation.name }
+
+  const failed = results.filter(isBlocking)
+  if (failed.length === 0) return { decision: 'none', tasks: [], reason: null }
+
+  const files = new Set()
+  const owners = new Map()
+  const findings = []
+  for (const check of failed) {
+    let declarations = []
+    if (check.kind === 'agent') {
+      const severities = new Set(Array.isArray(blockOn?.[check.name]) ? blockOn[check.name] : ['high'])
+      const blocking = asArray(check.findings).filter((f) => severities.has(f?.severity))
+      for (const finding of blocking) {
+        // One undeclared path is enough: the fix task may touch only declared paths, so a blocking
+        // finding outside them cannot be fixed by it, and retrying would leave it standing.
+        const found = declarationOf(planTasks, finding?.file)
+        if (!found) return { decision: 'escalate', tasks: [], reason: 'undeclared-path', check: check.name, file: finding?.file ?? null }
+        declarations.push(found)
+        findings.push(finding)
+      }
+    } else if (check.kind === 'command') {
+      declarations = mentionedDeclarations(normalizePath(check.output ?? ''), planTasks)
+    }
+    if (declarations.length === 0) return { decision: 'escalate', tasks: [], reason: 'unattributable', check: check.name }
+    for (const { task, path } of declarations) {
+      files.add(path)
+      owners.set(task.id, task)
+    }
+  }
+
+  const budget = Math.min(RUN_FIX_ROUND_CAP, Number.isInteger(fixRounds) && fixRounds >= 0 ? fixRounds : RUN_FIX_ROUND_CAP)
+  const used = runFixRoundsUsed(rounds)
+  if (used >= budget) return { decision: 'escalate', tasks: [], reason: 'budget-exhausted', taskId: `fix-${used}` }
+
+  const round = used + 1
+  const taskId = `fix-${round}`
+  return {
+    decision: 'retry',
+    reason: null,
+    tasks: [{
+      taskId,
+      branch: taskBranchName(runId, taskId),
+      round,
+      tier: escalateTier(highestTier([...owners.values()])),
+      checks: failed.map((check) => check.name),
+      files: [...files].sort(),
+      findings,
+    }],
+  }
 }
