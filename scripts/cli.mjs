@@ -151,6 +151,7 @@ export function harnessSettings(resolved, harnessName, defaultSandbox = 'clone')
     network: entry.network ?? false,
     timeoutMinutes: entry.timeoutMinutes ?? 30,
     tierModels: entry.tierModels ?? {},
+    limitWaitMinutes: entry.limitWaitMinutes ?? 60,
   }
 }
 
@@ -4668,7 +4669,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // The probe is told the sandbox this dispatch will actually use, so a harness whose warning
     // depends on it (OpenCode's opt-in `none`) can say so before anything is spawned.
-    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    const { sandboxMode, network, timeoutMinutes, tierModels, limitWaitMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const probe = await adapter.probe({ sandboxMode })
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
     if (probe.warning) io.out(`warning: ${probe.warning}`)
@@ -4732,6 +4733,7 @@ export async function runCli(argv, io = { out: console.log }) {
       network,
       timeoutMinutes,
       tierModels,
+      limitWaitMinutes,
       effortFor: () => selected.effort ?? (resolved.agents.implementer.effort || undefined),
       composeBriefFor,
       personaFor: (role) => personaBodies[role],

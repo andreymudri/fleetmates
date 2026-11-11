@@ -190,3 +190,16 @@ test('loadConfig refuses a malformed cost block in either layer', async () => {
     }
   }
 })
+
+test('harnesses.<name>.limitWaitMinutes accepts 0 to 1440 and defaults to 60 in the harness settings', async () => {
+  const { validateHarnesses } = await import('../scripts/config.mjs')
+  const { harnessSettings } = await import('../scripts/cli.mjs')
+  validateHarnesses({ opencode: { limitWaitMinutes: 0 } }, 'f')
+  validateHarnesses({ opencode: { limitWaitMinutes: 1440 } }, 'f')
+  for (const bad of [-1, 1441, 1.5, '60']) {
+    assert.throws(() => validateHarnesses({ opencode: { limitWaitMinutes: bad } }, 'f'), /limitWaitMinutes/, String(bad))
+  }
+  assert.equal(validateKey('harnesses.opencode.limitWaitMinutes', 30), 30)
+  assert.equal(harnessSettings({ harnesses: {} }, 'opencode', 'files').limitWaitMinutes, 60)
+  assert.equal(harnessSettings({ harnesses: { opencode: { limitWaitMinutes: 0 } } }, 'opencode', 'files').limitWaitMinutes, 0)
+})

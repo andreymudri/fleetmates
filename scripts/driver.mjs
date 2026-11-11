@@ -237,6 +237,37 @@ async function safeErrorReason(adapter, paths) {
   }
 }
 
+// Waiting out a provider limit (rate limit, free-quota reset) instead of giving the task up. Only an
+// adapter that can name its error (`readError`) and only an error it marks `retriable` qualifies:
+// an exit code alone says nothing about why a turn failed (see scripts/harnesses/opencode.mjs). An
+// empty balance or a spend limit is not retriable, because waiting does not fix it.
+export const MAX_LIMIT_WAITS = 3
+// A minute past the reset the provider names, as the ULU app does, so the first call after the
+// wait is not refused again by a clock a few seconds apart.
+export const LIMIT_SLACK_MS = 60_000
+// With no reset time named, 1, 2 and then 4 minutes.
+export const LIMIT_BACKOFF_MS = 60_000
+export const LIMIT_CONTINUE = 'Your previous turn stopped on a provider limit before it finished. The limit has reset. '
+  + 'Continue the same task from where you stopped, and end with the result object as before.'
+
+const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// How long to wait before the next try, or `null` to give the task up. Never throws: a broken
+// `readError` means the old orphan path, not a crashed pool.
+export async function limitDelay(adapter, streamPath, waitsSoFar, capMs) {
+  if (!(capMs > 0) || waitsSoFar >= MAX_LIMIT_WAITS || typeof adapter.readError !== 'function') return null
+  let error
+  try { error = await adapter.readError({ streamPath }) } catch { return null }
+  if (!error || error.retriable !== true || typeof error.type !== 'string') return null
+  const delayMs = Number.isSafeInteger(error.retryAfterMs) && error.retryAfterMs > 0
+    ? error.retryAfterMs + LIMIT_SLACK_MS
+    : LIMIT_BACKOFF_MS * 2 ** waitsSoFar
+  // Past the cap the wait is refused whole, never cut short: a try before the reset only spends
+  // another refused call.
+  if (delayMs > capMs) return null
+  return { delayMs, type: error.type }
+}
+
 async function safeUsage(adapter, streamPath) {
   try {
     return await adapter.readUsage({ streamPath })
@@ -399,6 +430,7 @@ export async function dispatchPhase({
   adapter, git, runRepo, runId, runBranch, phaseTasks,
   maxParallel, sandboxMode, network, timeoutMinutes, tierModels, effortFor,
   composeBriefFor, personaFor, runDir, completeEnforcement, execution, executionBoundary, fixRound = false,
+  limitWaitMinutes = 60, sleep = defaultSleep,
 }) {
   if (typeof fixRound !== 'boolean') throw new Error('fixRound must be a boolean')
   const contract = execution === undefined ? null : requiredExecution(execution, runId)
@@ -411,6 +443,7 @@ export async function dispatchPhase({
   await acquireLock(lockPath)
 
   const timeoutMs = (Number(timeoutMinutes) > 0 ? Number(timeoutMinutes) : 30) * 60_000
+  const limitWaitMs = (Number.isInteger(limitWaitMinutes) && limitWaitMinutes > 0 ? limitWaitMinutes : 0) * 60_000
 
   const resolveModel = (task) => {
     if (task.model) return task.model
@@ -762,7 +795,7 @@ export async function dispatchPhase({
     // exit between the spawn and the point we would otherwise start waiting, and that 'exit' would
     // fire with no listener and hang the driver.
     const exited = waitForExit(handle.child, timeoutMs)
-    const sessionId = (await handle.sessionId) ?? record.sessionId ?? null
+    let sessionId = (await handle.sessionId) ?? record.sessionId ?? null
     record = { ...record, taskId, sessionId, sandbox, state: 'running', prerequisites: sandbox.meta?.prerequisites, initialWorkerEnvironment: record.initialWorkerEnvironment ?? initialWorkerEnvironment, ...(effortIgnored ? { effortIgnored } : {}) }
     await writeJson(sessionFile, record)
 
@@ -816,6 +849,30 @@ export async function dispatchPhase({
     await handle.flushed
 
     let result = await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })
+    // A turn stopped by a provider limit is waited out and continued in the same session, so the
+    // teammate keeps what it had done. The session file says it is waiting and until when, so
+    // `sessions` shows a paused task rather than a hung one.
+    for (let waits = 0; !validateResult(result); waits += 1) {
+      const wait = await limitDelay(adapter, paths.streamPath, waits, limitWaitMs)
+      if (!wait) break
+      const previous = Array.isArray(record.limitWaits) ? record.limitWaits.slice(-19) : []
+      record = { ...record, state: 'waiting-limit', resumeAt: Date.now() + wait.delayMs,
+        limitWaits: [...previous, { type: wait.type, delayMs: wait.delayMs, at: Date.now() }] }
+      await writeJson(sessionFile, record)
+      await sleep(wait.delayMs)
+      await Promise.all([paths.resultPath, paths.streamPath, paths.errPath].map(file => rm(file, { force: true })))
+      const again = sessionId
+        ? await adapter.resume({ sandbox, sessionId, message: LIMIT_CONTINUE, model, effort, network, ...paths })
+        : await adapter.spawn({ sandbox, prompt, model, effort, network, ...paths })
+      const exitedAgain = waitForExit(again.child, timeoutMs)
+      sessionId = (await again.sessionId) ?? sessionId
+      const { resumeAt: _resumeAt, ...rest } = record
+      record = { ...rest, sessionId, state: 'running' }
+      await writeJson(sessionFile, record)
+      if ((await exitedAgain) === 'timeout') return orphan('timeout')
+      await again.flushed
+      result = await adapter.readResult({ resultPath: paths.resultPath, streamPath: paths.streamPath })
+    }
     if (!validateResult(result)) return orphan((await safeErrorReason(adapter, paths)) || (await stderrTail(paths.errPath)) || 'no result')
 
     await adapter.collect(git, { runRepo, sandbox, branch })
