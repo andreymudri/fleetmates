@@ -387,7 +387,8 @@ before a push where possible, and reported rather than hidden where not:
 - After that, `land.mode` decides how the run branch lands: `pr` (the default) opens a pull request
   without asking, and `ask` offers merge, pull request or keep. `land.autoMerge`, false by default
   and accepted only in `fleetmates.gate.json`, merges that pull request when the remote CI passed
-  with at least one workflow run and no finding was left unresolved. A repository with no
+  with at least one workflow run, no finding was left unresolved, and `merge-guard` finds no change
+  to the gate manifest, a `protected` path or a CI workflow. A repository with no
   workflows is never merged automatically.
 - `fleet.mode` is `ask` (the default) or `auto`. With `auto`, an eligible plan starts as a fleet
   without the fleet-or-inline question.

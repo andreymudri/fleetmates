@@ -60,3 +60,61 @@ test('a hand-written local autoMerge is refused by every reader, so it can never
   await assert.rejects(loadConfig(ctx.root), /land\.autoMerge may only be set in fleetmates\.gate\.json/)
   assert.equal(await runCli(['config', 'get', 'land.autoMerge', '--root', ctx.root], ctx.io), 2)
 })
+
+// merge-guard: auto-merge never lands a branch that edits the gate's own rules or the CI.
+async function guardRepo(t, manifest) {
+  const ctx = await repo(t)
+  const g = (args) => execFileSync('git', args, { cwd: ctx.root })
+  g(['config', 'user.email', 'test@example.com'])
+  g(['config', 'user.name', 'Test'])
+  g(['checkout', '--quiet', '-b', 'main'])
+  if (manifest) await writeFile(path.join(ctx.root, 'fleetmates.gate.json'), JSON.stringify(manifest), 'utf8')
+  await writeFile(path.join(ctx.root, 'app.js'), '1\n', 'utf8')
+  g(['add', '.'])
+  g(['commit', '--quiet', '-m', 'base'])
+  g(['checkout', '--quiet', '-b', 'run'])
+  const change = async (file, text = 'x\n') => {
+    await import('node:fs/promises').then((fs) => fs.mkdir(path.dirname(path.join(ctx.root, file)), { recursive: true }))
+    await writeFile(path.join(ctx.root, file), text, 'utf8')
+    g(['add', '.'])
+    g(['commit', '--quiet', '-m', `change ${file}`])
+  }
+  const guard = async () => {
+    ctx.lines.length = 0
+    return runCli(['merge-guard', '--branch', 'run', '--base', 'main', '--root', ctx.root], ctx.io)
+  }
+  return { ...ctx, change, guard }
+}
+
+test('merge-guard allows a branch that touches only ordinary files', async (t) => {
+  const ctx = await guardRepo(t, { protected: ['skills/x.md'] })
+  await ctx.change('app.js', '2\n')
+  assert.equal(await ctx.guard(), 0, ctx.lines.join('\n'))
+})
+
+test('merge-guard refuses a branch that changes the gate manifest', async (t) => {
+  const ctx = await guardRepo(t, { protected: [] })
+  await ctx.change('fleetmates.gate.json', JSON.stringify({ land: { autoMerge: true } }))
+  assert.equal(await ctx.guard(), 1)
+  assert.match(ctx.lines.join('\n'), /auto-merge refused: run changes fleetmates\.gate\.json/)
+})
+
+test('merge-guard refuses a path from the base manifest\'s protected list, case folded', async (t) => {
+  const ctx = await guardRepo(t, { protected: ['skills/x.md'] })
+  await ctx.change('Skills/X.md')
+  assert.equal(await ctx.guard(), 1, ctx.lines.join('\n'))
+})
+
+test('merge-guard refuses a branch that changes a CI workflow', async (t) => {
+  const ctx = await guardRepo(t, null)
+  await ctx.change('.github/workflows/test.yml', 'on: push\n')
+  assert.equal(await ctx.guard(), 1)
+  assert.match(ctx.lines.join('\n'), /\.github\/workflows\/test\.yml/)
+})
+
+test('merge-guard exits 2 on a missing branch', async (t) => {
+  const ctx = await guardRepo(t, null)
+  ctx.lines.length = 0
+  assert.equal(await runCli(['merge-guard', '--branch', 'nope', '--base', 'main', '--root', ctx.root], ctx.io), 2)
+  assert.equal(await runCli(['merge-guard', '--base', 'main', '--root', ctx.root], ctx.io), 2)
+})

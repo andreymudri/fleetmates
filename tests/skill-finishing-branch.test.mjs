@@ -310,4 +310,6 @@ test('Auto-merge requires opt-in in the manifest, a passing remote CI with workf
   assert.match(text, /is never merged automatically/)
   assert.match(text, /No unresolved finding was surfaced in this run/)
   assert.match(text, /Never pass --admin/)
+  assert.match(text, /merge-guard exits 0\./)
+  assert.ok(scope.code.some((b) => /cli\.mjs" merge-guard --branch <run branch> --base <base branch> --root <project root>/.test(b.code)), 'no merge-guard block')
 })
