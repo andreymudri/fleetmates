@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.9.0
 
 An A/B eval on 5 FeatureBench tasks found the same quality with and without the plugin, while the
 fleet arm cost 5x to 12x as much; the orchestrator was about 30% of the fleet's cost and the
