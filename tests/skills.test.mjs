@@ -247,3 +247,29 @@ test('fleet-supervision documents the watchdog events and the commands each resp
   // The heartbeat report itself did not change: liveness still only reports.
   assertStatement(doc.section(/^The heartbeat$/), /^It reports; it does not act\.$/, 'liveness must still be described as report-only')
 })
+
+// The other tests read a skill as one corpus, `SKILL.md` plus its `reference/` files, so a pinned
+// sentence stays pinned wherever it lands. That is right for a rare case and wrong for these: a
+// reference is read only when its situation comes up, and the 8 KB cap pushes text out of the
+// core. The steps of every run and the rules that hold on every run stay in the file that is
+// always loaded.
+const CORE = {
+  'parallel-execution': {
+    headings: ['Check the plan before init-run', 'Start the run', 'Batches', 'Dispatch a phase', 'Watch the phase',
+      'After a phase returns', 'Before dispatching tm-integrator', 'Review the run', 'Read results, not diffs',
+      'Invariants', 'When to read a reference'],
+    sentences: ['never touches the main worktree', 'Phase N+1 does not start before phase N gets a PASS.'],
+  },
+  'phase-gate': {
+    headings: ['Run it', 'Agent and mcp checks', 'Review the run', 'Reporting rule', 'When to read a reference'],
+    sentences: ['Never report a phase done without a recorded PASS in `status.json`.', 'Evidence before claims, always.'],
+  },
+}
+
+for (const [name, { headings, sentences }] of Object.entries(CORE)) {
+  test(`${name}: the every-run sections and rules are in SKILL.md itself, not in a reference`, async () => {
+    const core = await readFile(new URL(`../skills/${name}/SKILL.md`, import.meta.url), 'utf8')
+    assert.deepEqual(core.split('\n').filter((line) => line.startsWith('## ')).map((line) => line.slice(3)), headings)
+    for (const sentence of sentences) assert.ok(core.includes(sentence), `${name}/SKILL.md says: ${sentence}`)
+  })
+}

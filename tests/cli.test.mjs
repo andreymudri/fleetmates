@@ -475,12 +475,19 @@ test('workflow --out writes the generated source to the file and prints only its
     // Relative to --root, as --plan is.
     assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--out', 'wf/phase-1.mjs'], io), 0)
     const file = path.join(root, 'wf', 'phase-1.mjs')
-    assert.deepEqual(lines, [file, 'workflow for run r1, phase 1: 1 task'])
+    const base = execFileSync('git', ['branch', '--list', 'main', 'master', '--format=%(refname:short)'], { cwd: root, encoding: 'utf8' }).trim()
+    // No `--base` was passed, so the briefs carry a guessed one. The guess is wrong for a run cut
+    // from any other branch, and with `--out` nobody reads the briefs: the summary has to say it.
+    const derived = `base ${base} was derived, not passed: pass --base if this run was cut from another branch`
+    assert.deepEqual(lines, [file, 'workflow for run r1, phase 1: 1 task', derived])
     assert.equal(await readFile(file, 'utf8'), `${printed}\n`, 'the file holds exactly the source stdout would have carried')
     lines.length = 0
     const absolute = path.join(root, 'abs.mjs')
     assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--out', absolute], io), 0)
-    assert.deepEqual(lines, [absolute, 'workflow for run r1, phase 1: 1 task'])
+    assert.deepEqual(lines, [absolute, 'workflow for run r1, phase 1: 1 task', derived])
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--base', base, '--out', absolute], io), 0)
+    assert.deepEqual(lines, [absolute, 'workflow for run r1, phase 1: 1 task'], 'a base the caller passed is not announced')
   })
 })
 

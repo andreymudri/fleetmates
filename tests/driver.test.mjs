@@ -696,10 +696,14 @@ test('a retriable provider limit is waited out and the same session continues to
   adapter.readError = async () => ({ type: 'provider.free-limit', message: 'limit', retriable: true, retryAfterMs: 5_000 })
   const slept = []
   const seen = []
+  const resumeAts = []
+  const started = Date.now()
   const out = await dispatchPhase(baseArgs(runDir, {
     runId: 'r-lw', adapter, completeEnforcement, limitWaitMinutes: 60,
-    sleep: async (ms) => { slept.push(ms); seen.push((await readSession(runDir, 'T1')).state) },
+    sleep: async (ms) => { slept.push(ms); const waiting = await readSession(runDir, 'T1'); seen.push(waiting.state); resumeAts.push(waiting.resumeAt) },
   }))
+  assert.equal(resumeAts.length, 1)
+  assert.ok(Number.isFinite(resumeAts[0]) && resumeAts[0] > started, 'the waiting record says when the task resumes')
   assert.deepEqual(out.orphaned, [])
   assert.equal(out.results[0].status, 'done')
   assert.deepEqual(slept, [5_000 + LIMIT_SLACK_MS])
@@ -716,6 +720,22 @@ test('a retriable provider limit is waited out and the same session continues to
 
 // The wait is refused whole when the reset is further away than the configured cap, and when the
 // cap is 0. Either way the task is orphaned with the old reason and nothing sleeps.
+// The resume time describes a wait. Once the wait is over it is wrong, whatever happens next: a
+// record left `orphaned` with a `resumeAt` reads as a task that is about to come back.
+test('a resume that fails after a limit wait orphans the task with no resume time left behind', async () => {
+  const runDir = await tmpRunDir('limit-wait-resume-fails')
+  const { adapter, completeEnforcement } = makeStubAdapter({ result: null })
+  adapter.readError = async () => ({ type: 'provider.free-limit', message: 'limit', retriable: true, retryAfterMs: 5_000 })
+  adapter.resume = async () => { throw new Error('resume boom') }
+  const out = await dispatchPhase(baseArgs(runDir, { runId: 'r-lwf', adapter, completeEnforcement, limitWaitMinutes: 60, sleep: async () => {} }))
+  assert.deepEqual(out.orphaned, ['T1'])
+  const session = await readSession(runDir, 'T1')
+  assert.equal(session.state, 'orphaned')
+  assert.equal(session.exitReason, 'resume boom')
+  assert.equal(session.resumeAt, undefined)
+  assert.equal(session.limitWaits.length, 1, 'the wait itself stays in the history')
+})
+
 test('a limit that resets past limitWaitMinutes, or with the wait off, orphans without waiting', async () => {
   for (const [name, minutes, retryAfterMs] of [['past-cap', 1, 60_001 - LIMIT_SLACK_MS + 1], ['off', 0, 1_000]]) {
     const runDir = await tmpRunDir(`limit-${name}`)
