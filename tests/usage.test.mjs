@@ -21,6 +21,34 @@ test('projectSlug replaces both separator kinds and the drive colon', () => {
   assert.doesNotMatch(projectSlug('D:\\a\\b'), /:/, 'a slug with a colon is not a legal Windows directory name')
 })
 
+// Claude Code writes one transcript line per content block of an assistant message, and every one
+// of those lines repeats the message's id and its whole usage. Summing per line counted a
+// three-block message three times, which doubled the cost the report prices from these totals.
+test('summarizeTranscript counts a message once, however many lines repeat its id', () => {
+  const block = (id, over) => { const r = usageRecord(over); r.message.id = id; return r }
+  const first = { input_tokens: 1, output_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 5 }
+  const t = summarizeTranscript([
+    block('msg_a', first), block('msg_a', first), block('msg_a', first),
+    block('msg_b', { input_tokens: 2, output_tokens: 20, cache_read_input_tokens: 200 }),
+    block('msg_a', first),
+    usageRecord({ output_tokens: 7 }), usageRecord({ output_tokens: 7 }),
+  ])
+  assert.equal(t.turns, 4, 'two ids, plus two records that carry no id and so cannot be told apart')
+  assert.equal(t.input, 3)
+  assert.equal(t.output, 44)
+  assert.equal(t.cacheRead, 300)
+  assert.equal(t.cacheWrite, 5)
+})
+
+// A line written while the message was still streaming carries a smaller output count than the
+// last one. The last line of an id is the message's final usage.
+test('summarizeTranscript takes the last usage a repeated id carries', () => {
+  const block = (id, over) => { const r = usageRecord(over); r.message.id = id; return r }
+  const t = summarizeTranscript([block('msg_a', { output_tokens: 3 }), block('msg_a', { output_tokens: 40 })])
+  assert.equal(t.turns, 1)
+  assert.equal(t.output, 40)
+})
+
 test('summarizeTranscript sums every usage category', () => {
   const t = summarizeTranscript([
     usageRecord({ input_tokens: 1, output_tokens: 10, cache_read_input_tokens: 100, cache_creation_input_tokens: 5 }),

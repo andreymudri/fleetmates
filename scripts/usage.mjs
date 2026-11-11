@@ -27,12 +27,26 @@ export function projectSlug(root) {
 // by ordering or by a retried first turn — the same reasoning the quiet reporter applies when it
 // takes counts from the root summary rather than from whichever event arrived first. Prefer the
 // definition that cannot be fooled.
+//
+// A message is counted ONCE. Claude Code writes one line per content block of an assistant message,
+// and each line repeats the message's `id` and its whole `usage`; summing per line counted a
+// three-block message three times, and the cost priced from these totals came out about double.
+// The last line of an id wins, because a line written mid-stream can carry a smaller output count.
+// A record with no id cannot be matched to another, so it counts on its own.
 export function summarizeTranscript(records) {
   const totals = { turns: 0, prefix: 0, peak: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
-  let min = null
+  const usages = []
+  const byId = new Map()
   for (const record of records) {
     const usage = record?.message?.usage
     if (!usage || typeof usage !== 'object') continue
+    const id = record.message.id
+    if (typeof id !== 'string' || id === '') { usages.push(usage); continue }
+    if (byId.has(id)) usages[byId.get(id)] = usage
+    else { byId.set(id, usages.length); usages.push(usage) }
+  }
+  let min = null
+  for (const usage of usages) {
     totals.turns += 1
     totals.input += usage.input_tokens ?? 0
     totals.output += usage.output_tokens ?? 0

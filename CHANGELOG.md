@@ -77,6 +77,12 @@ reviewers about 17%. The changes below cut those two shares.
 - `retro --run <id>` prints proposed learnings from a run's fix rounds, failing gates, orphaned or
   failed teammates and limit waits, in the `fleetmates.learnings.md` format. It writes nothing.
 
+### Fixed
+
+- `usage` counts an assistant message once. Claude Code writes one transcript line per content
+  block, each repeating the message's id and usage, so turns, output and cache tokens were summed
+  two or three times over, and a priced report came out about double.
+
 ## v2.8.0
 
 ### Added
