@@ -101,7 +101,9 @@ test('renderUsage truncates an agentType wider than its column', () => {
   })
   const row = out.split('\n').find((l) => l.includes('fleetmates:tm-impl'))
   assert.ok(row, 'the row must be present')
-  assert.ok(row.length < long.length + 40, 'the oversized cell must be truncated, not printed whole')
+  // +50, not the +40 this had before the `peak` column (10 wide) joined the row: the bound is
+  // about the agentType cell, so it grows with the columns after it and nothing else.
+  assert.ok(row.length < long.length + 50, 'the oversized cell must be truncated, not printed whole')
   assert.match(row, /…/, 'a truncated cell is marked, so the reader can see it was cut')
   assert.match(row, /sonnet/, 'the model must still be present')
   assert.doesNotMatch(row, /suffix/, 'the tail of an oversized cell must not survive into the row')

@@ -15,7 +15,7 @@ import { captureEnvironment, validateEnvironmentRecipe } from './environment-pre
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
 import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
-import { renderUsage } from './usage.mjs'
+import { renderUsage, annotateUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
 import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
@@ -6211,11 +6211,15 @@ export async function runCli(argv, io = { out: console.log }) {
         return 0
       }
     }
+    // Prices, budget and context windows come from the `cost` config. Read before the store, so a
+    // malformed config is named rather than silently pricing nothing.
+    const usageConfig = await resolveConfig(root, io)
+    if (!usageConfig) return 2
     // Reads the harness's own transcript store, which is internal and may change: a failure to
     // find it is reported with the path rather than rendered as an empty table, because a table
     // of zeros reads as "this run cost nothing".
     try {
-      const report = await readSessionUsage({
+      const raw = await readSessionUsage({
         // CLAUDE_CONFIG_DIR is the harness's own variable for relocating that directory, so
         // honouring it is correct for a user who has moved it — and it is what lets this command
         // be tested against a fixture store instead of the developer's real transcripts.
@@ -6223,6 +6227,7 @@ export async function runCli(argv, io = { out: console.log }) {
         root,
         sessionId: typeof flags.session === 'string' && flags.session !== '' ? flags.session : null,
       })
+      const report = annotateUsage(raw, usageConfig.cost)
       // The JSON branch does not pass through `renderUsage`, so neutralising the table left this
       // one raw: `JSON.stringify` escapes the C0 range and leaves C1 and U+2028/U+2029 alone, and
       // U+009B is CSI to a terminal decoding C1. The values are read from a meta.json an agent can
