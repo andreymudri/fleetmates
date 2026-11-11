@@ -292,3 +292,24 @@ test('a red, pending or unreadable CI means the merge is not offered', async () 
     subject: /merge is (not )?offered|offer the merge/i,
   })
 })
+
+// land.mode and land.autoMerge (scripts/config.mjs): the landing choice is per-repository policy.
+test('Integration options opens a pull request without asking when land.mode is pr, and asks only under ask', async () => {
+  const scope = (await doc()).section(/^Integration options$/)
+  assertClaim(scope, { claim: /^With pr, the default, open a pull request for the run branch without asking:/ })
+  assertClaim(scope, { claim: /^With ask, present the choice and do not pick one unilaterally:/ })
+  assert.ok(scope.code.some((b) => /^gh pr create --head <run branch> --base <base branch>/m.test(b.code)), 'no gh pr create block')
+})
+
+test('Auto-merge requires opt-in in the manifest, a passing remote CI with workflows, and no unresolved finding', async () => {
+  const scope = (await doc()).section(/^Auto-merge$/)
+  const text = scope.statements.map((s) => s.text).join('\n')
+  assert.match(text, /land\.autoMerge is false by default and is read only from the tracked fleetmates\.gate\.json/)
+  assert.match(text, /land\.autoMerge is true and land\.mode is pr/)
+  assert.match(text, /ci-wait exited 0 on the tip with at least one workflow run/)
+  assert.match(text, /is never merged automatically/)
+  assert.match(text, /No unresolved finding was surfaced in this run/)
+  assert.match(text, /Never pass --admin/)
+  assert.match(text, /merge-guard exits 0\./)
+  assert.ok(scope.code.some((b) => /cli\.mjs" merge-guard --branch <run branch> --base <base branch> --root <project root>/.test(b.code)), 'no merge-guard block')
+})

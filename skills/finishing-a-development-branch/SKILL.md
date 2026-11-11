@@ -206,10 +206,48 @@ Keeping the branch for further work stays available.
 ## Integration options
 
 Once a freshly re-run gate has passed for every phase and any parked findings are on the table,
-present the choice — do not pick one unilaterally:
+the `land.mode` key decides how the run branch lands. Read it back with `config get`:
+
+    node "<fleetmates root>/scripts/cli.mjs" config get land.mode --root <project root>
+
+With `pr`, the default, open a pull request for the run branch without asking:
+
+    gh pr create --head <run branch> --base <base branch> --fill
+
+Put the unresolved findings from the step above in the pull request body, one per line, so they
+stay in front of whoever reviews it.
+
+With `ask`, present the choice and do not pick one unilaterally:
 
 1. **Merge to the default branch.**
 2. **Open a pull request** for external review before it lands.
 3. **Keep the branch for further work** — integration isn't forced just because the gate passed.
 
 Carry out whichever the user picks; don't default to merging in the absence of an answer.
+
+## Auto-merge
+
+`land.autoMerge` is false by default and is read only from the tracked `fleetmates.gate.json`;
+`config set land.autoMerge true --local` is refused with exit 2. A repository opts in once:
+
+    node "<fleetmates root>/scripts/cli.mjs" config set land.autoMerge true --root <project root>
+
+Merge the pull request you just opened without asking only when every one of these holds:
+
+- `land.autoMerge` is true and `land.mode` is `pr`.
+- `ci-wait` exited `0` on the tip with at least one workflow run. A project with no remote CI
+  (`no CI workflows: skipped`) is never merged automatically.
+- No unresolved finding was surfaced in this run.
+- `merge-guard` exits `0`. It refuses, with exit `1`, a run branch that changes the gate manifest,
+  the flaky quarantine, any path in the base branch's `protected` list, or a CI workflow, because
+  a run that rewrites the rules it is judged by must not judge itself:
+
+      node "<fleetmates root>/scripts/cli.mjs" merge-guard --branch <run branch> --base <base branch> --root <project root>
+
+Then merge it:
+
+    gh pr merge <number> --merge
+
+If any condition fails, leave the pull request open and say in one line which one failed. Never
+pass `--admin` and never bypass a required review: auto-merge is the user's standing permission
+to skip their own click, not to skip the repository's rules.
