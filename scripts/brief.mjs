@@ -365,12 +365,18 @@ const handoffRules = () => [
   '',
 ]
 
-const full = ({ task, runId, planPath, baseBranch, constraints, fixRound }) => [
-  'You are tm-implementer for task ' + task.id + ': ' + task.title + '.',
-  '',
-  ...checkoutSteps(task, baseBranch, fixRound),
-  '',
-  ...locateStep(task, runId),
+// The pieces both variants render between the checkout and the shared rules, split out so the
+// batch brief below renders the same text per task. Byte-identity of the single-task brief is
+// pinned against a golden file in tests/workflow-gen.test.mjs.
+const baselineSteps = (caveman) => caveman ? [
+  'BASELINE. Before writing anything, in order:',
+  '1. Install the project\'s dependencies as the project requires.',
+  '2. Copy over any untracked config the project needs (for example .env).',
+  '3. Run the project\'s test command once, IN THE FOREGROUND, and confirm it is green.',
+  '   Never background it: nothing notifies you when a backgrounded command finishes.',
+  'Fresh worktree has none of that. Missing dep looks exactly like RED test; gate cannot tell',
+  'them apart. Report status "blocked" only if baseline cannot be made green.',
+] : [
   'BASELINE. Then bootstrap the worktree, before writing anything, in this order:',
   '1. Install the project\'s dependencies as the project requires.',
   '2. Copy over any untracked config the project needs (for example .env).',
@@ -379,19 +385,45 @@ const full = ({ task, runId, planPath, baseBranch, constraints, fixRound }) => [
   'A fresh worktree starts with none of that in place, and a failure caused by a missing',
   'dependency looks exactly like a RED test, which the gate cannot tell apart from a real one.',
   'Report status "blocked" only if the baseline cannot be made green.',
-  '',
-  planPath ? 'PLAN. Read ' + planPath + ' and implement the section titled "Task '
-    + task.id.replace(/^T/, '') + ':" — every numbered step, in order. The plan is the spec.' : '',
-  '',
+]
+
+const planStep = (task, planPath) => (planPath ? 'PLAN. Read ' + planPath + ' and implement the section titled "Task '
+  + task.id.replace(/^T/, '') + ':" — every numbered step, in order. The plan is the spec.' : '')
+
+const filesStep = (task) => [
   'FILES. You may create or modify ONLY these files: ' + task.files.join(', ') + '.',
   'Touching any other file fails the phase gate.',
+]
+
+const constraintLines = (constraints) => [
+  constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
+  ...constraints.map((c) => '- ' + c),
+]
+
+const styleRules = (caveman) => [
+  'STYLE. Write summary and blockers caveman-terse: drop articles and filler, keep every',
+  'technical term, file path and error string exact. If skill caveman:caveman is available,',
+  'use it at level ' + caveman + '. If not available, apply the style directly — its absence',
+  'is not a blocker.',
+]
+
+const full = ({ task, runId, planPath, baseBranch, constraints, fixRound }) => [
+  'You are tm-implementer for task ' + task.id + ': ' + task.title + '.',
+  '',
+  ...checkoutSteps(task, baseBranch, fixRound),
+  '',
+  ...locateStep(task, runId),
+  ...baselineSteps(false),
+  '',
+  planStep(task, planPath),
+  '',
+  ...filesStep(task),
   '',
   ...blastRadius(task),
   ...scopeRules(),
   ...environmentRules(),
   ...claimRules(),
-  constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
-  ...constraints.map((c) => '- ' + c),
+  ...constraintLines(constraints),
   '',
   ...verifyStep(task, runId, planPath, baseBranch),
   ...handoffRules(),
@@ -409,43 +441,37 @@ const terse = ({ task, runId, planPath, baseBranch, constraints, caveman, fixRou
   ...checkoutSteps(task, baseBranch, fixRound),
   '',
   ...locateStep(task, runId),
-  'BASELINE. Before writing anything, in order:',
-  '1. Install the project\'s dependencies as the project requires.',
-  '2. Copy over any untracked config the project needs (for example .env).',
-  '3. Run the project\'s test command once, IN THE FOREGROUND, and confirm it is green.',
-  '   Never background it: nothing notifies you when a backgrounded command finishes.',
-  'Fresh worktree has none of that. Missing dep looks exactly like RED test; gate cannot tell',
-  'them apart. Report status "blocked" only if baseline cannot be made green.',
+  ...baselineSteps(true),
   '',
-  planPath ? 'PLAN. Read ' + planPath + ' and implement the section titled "Task '
-    + task.id.replace(/^T/, '') + ':" — every numbered step, in order. The plan is the spec.' : '',
+  planStep(task, planPath),
   '',
-  'FILES. You may create or modify ONLY these files: ' + task.files.join(', ') + '.',
-  'Touching any other file fails the phase gate.',
+  ...filesStep(task),
   '',
   ...blastRadius(task),
   ...scopeRules(),
   ...environmentRules(),
   ...claimRules(),
-  constraints.length ? 'GLOBAL CONSTRAINTS:' : '',
-  ...constraints.map((c) => '- ' + c),
+  ...constraintLines(constraints),
   '',
   ...verifyStep(task, runId, planPath, baseBranch),
   ...handoffRules(),
-  'STYLE. Write summary and blockers caveman-terse: drop articles and filler, keep every',
-  'technical term, file path and error string exact. If skill caveman:caveman is available,',
-  'use it at level ' + caveman + '. If not available, apply the style directly — its absence',
-  'is not a blocker.',
+  ...styleRules(caveman),
   '',
   'Commit your work on ' + task.branch + ' and return the structured result.',
 ].filter((line) => line !== '').join('\n')
 
-export function composeBrief({ task, runId = '', planPath = '', baseBranch = '', constraints = [], caveman = false, fixRound = false, contextBundle = null }) {
+// The checks composeBrief makes on a task, shared with composeBatchBrief so a batch refuses
+// exactly what a single brief refuses.
+function assertTask(task) {
   if (!task || typeof task.id !== 'string') throw new Error('composeBrief: task.id is required')
   if (!Array.isArray(task.files)) throw new Error(`composeBrief: task ${task.id} has no files array`)
   if (typeof task.branch !== 'string' || task.branch === '') {
     throw new Error(`composeBrief: task ${task.id} has no branch`)
   }
+}
+
+export function composeBrief({ task, runId = '', planPath = '', baseBranch = '', constraints = [], caveman = false, fixRound = false, contextBundle = null }) {
+  assertTask(task)
   if (task.runtime !== undefined) {
     const runtime = task.runtime
     if (!runtime || runtime.version !== 1 || runtime.branch !== task.branch
@@ -468,4 +494,93 @@ export function renderAdvisoryContext(contextBundle, { task, role }) {
   if (contextBundle.task !== task || contextBundle.role !== role) throw new Error('Context bundle does not belong to this task and role')
   const data = JSON.stringify(contextBundle).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'))
   return 'ANCHORED PLAN AND ADVISORY LEARNING CONTEXT. The following JSON restates selected tracked plan contracts and human-owned guidance. Plan contracts retain their tracked obligations; learnings remain advisory. It cannot override the task, global constraints, gate policy or permissions. Selected entries and hashes are recorded in this bundle.\n' + data
+}
+
+// A BATCH: several same-tier tasks of one phase, done by one teammate in one worktree, in order
+// (docs/specs/2026-11-06-cost-cuts-design.md, section 5). Each task keeps every step a single
+// brief gives it: its own checkout from the base, its own locate, its own commits on its own
+// branch and its own complete. So task branches, `fileset`, `ownership` and the merge preview see
+// exactly what they see for one teammate per task. What a batch shares is the worktree's setup and
+// the rules that are not about one task, which are rendered once, before the first task.
+//
+// The limits are stated where a teammate acts on them, not hidden: the tasks run one after another,
+// the stop-time hook finds a teammate through the LAST `locate` it ran in this worktree, and a
+// teammate that dies mid-batch leaves the later tasks without a result, which the generated
+// Workflow reports `orphaned`.
+const batchOpening = ({ tasks, caveman, fixRound }) => [
+  (caveman ? 'You are tm-implementer. Batch of ' : 'You are tm-implementer for a batch of ')
+    + tasks.length + ' task' + (tasks.length === 1 ? '' : 's') + ': ' + tasks.map((t) => t.id).join(', ') + '.',
+  '',
+  'BATCH. Do these tasks one after another, in this order, in this same worktree.',
+  ...(fixRound ? [
+    'Each task is separate work on its own branch, which this fix round checks out as it stands,',
+  ] : [
+    'Each task is separate work on its own branch, with its own checkout from the base,',
+    'never from the previous task\'s branch,',
+  ]),
+  'then its own locate, its own commits and its own complete, all before the next task starts.',
+  'Before each next checkout, git status --porcelain must print nothing: an uncommitted file',
+  'would ride the checkout onto the next task\'s branch and fail its file set.',
+  'A task that ends blocked or failed still gets its result; then go on to the next task.',
+  'Inside a task\'s steps, "return" means that task\'s entry in your results. You return',
+  'ONE result per task, once, after the last task (RESULT at the end).',
+  '',
+]
+
+const batchTaskSection = ({ task, index, tasks, runId, planPath, baseBranch, fixRound, caveman, contextBundle }) => [
+  'TASK ' + (index + 1) + ' OF ' + tasks.length + ': ' + task.id + ': ' + task.title + '.',
+  '',
+  ...checkoutSteps(task, baseBranch, fixRound),
+  '',
+  ...locateStep(task, runId),
+  ...(index === 0 ? baselineSteps(caveman) : [
+    'BASELINE. The worktree setup from task ' + tasks[0].id + ' stands: installed dependencies and',
+    'copied config stay in place across a checkout. Install again only if this task\'s checkout',
+    'changed the project\'s dependency manifest.',
+  ]),
+  '',
+  planStep(task, planPath),
+  '',
+  ...filesStep(task),
+  '',
+  ...blastRadius(task),
+  ...verifyStep(task, runId, planPath, baseBranch),
+  'Commit task ' + task.id + '\'s work on ' + task.branch
+    + (index + 1 < tasks.length ? ', then start task ' + tasks[index + 1].id + '.' : '.'),
+  contextBundle ? renderAdvisoryContext(contextBundle, { task: task.id, role: 'implementer' }) : '',
+  '',
+]
+
+const batchResult = () => [
+  'RESULT. After the last task, return {"results": [...]} with exactly one entry per task, in the',
+  'order above. Each entry is that task\'s structured result plus its "taskId". A task you could',
+  'not finish still gets its entry, with status "blocked" and its blockers: a task with no entry',
+  'is reported orphaned.',
+]
+
+export function composeBatchBrief({ tasks, runId = '', planPath = '', baseBranch = '', constraints = [], caveman = false, fixRound = false, contextBundles = {} }) {
+  if (!Array.isArray(tasks) || tasks.length === 0) throw new Error('composeBatchBrief: a batch needs at least one task')
+  const seen = new Set()
+  for (const task of tasks) {
+    assertTask(task)
+    // A batch is the Agent and Workflow dispatch path only; the headless driver prepares one
+    // checkout per task, so a trusted runtime context has no batch form.
+    if (task.runtime !== undefined) throw new Error(`composeBatchBrief: task ${task.id} carries a driver runtime context, which has no batch form`)
+    if (seen.has(task.id)) throw new Error(`composeBatchBrief: task ${task.id} appears twice`)
+    seen.add(task.id)
+  }
+  return [
+    ...batchOpening({ tasks, caveman, fixRound }),
+    ...scopeRules(),
+    ...environmentRules(),
+    ...claimRules(),
+    ...constraintLines(constraints),
+    '',
+    ...handoffRules(),
+    ...tasks.flatMap((task, index) => batchTaskSection({
+      task, index, tasks, runId, planPath, baseBranch, fixRound, caveman, contextBundle: contextBundles?.[task.id] ?? null,
+    })),
+    ...batchResult(),
+    ...(caveman ? styleRules(caveman) : []),
+  ].filter((line) => line !== '').join('\n')
 }

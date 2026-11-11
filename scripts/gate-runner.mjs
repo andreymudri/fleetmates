@@ -849,11 +849,11 @@ async function collectReport({ target, parts }, cwd) {
 }
 
 // `optional: true` is meaningful on a `command` check — "this lint is advisory". On an
-// enforcement check (`fileset`, `ownership`, `merge`) it would mean "detect the violation and
-// ship anyway", which is never coherent to want. All three are forced non-optional here, at
+// enforcement check (`fileset`, `ownership`, `merge`, `fileset-run`) it would mean "detect the
+// violation and ship anyway", which is never coherent to want. All four are forced non-optional here, at
 // the point the result is built, so an uncommitted manifest cannot disable enforcement while
 // appearing to record it.
-const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge'])
+const ALWAYS_ENFORCED_KINDS = new Set(['fileset', 'ownership', 'merge', 'fileset-run'])
 
 // A CHECK KIND MUST BE A STRING BEFORE ANYTHING IS DECIDED FROM IT.
 //
@@ -1711,6 +1711,43 @@ export async function runFilesetCheck(check, ctx = {}) {
   return { ...result, branchShas }
 }
 
+// The run entry's computed check (`checksForRun` in scripts/gate-config.mjs injects it). `fileset`
+// answers per task branch for the phase in progress; this answers once for the whole run, over the
+// integrated diff `merge-base(base, runTip)..runTip`, which is what the run review reads. It sees
+// what no phase's `fileset` diffs: a commit made on the run branch itself, and a fix branch that
+// is no plan task's. Every changed path must be declared by SOME task of the plan at the anchor,
+// and a protected one must be marked `(protected)` by a task that declares it.
+//
+// Computed from git and the anchored plan only (`ctx.tasks` is that plan, parsed by
+// `deriveContext`): nothing here reads `.fleetmates/`. Like `fileset` it compares the NET diff, so a
+// path added and removed again inside the run reads as unchanged. The marking is not case-folded,
+// for the reason `protectedViolations` gives.
+export async function runFilesetRunCheck(check, ctx = {}) {
+  const { git, runSha, anchorSha, phaseError } = ctx
+  if (!git) return checkResult(check, 'fail', 'fileset-run check has no git access')
+  if (phaseError) return checkResult(check, 'fail', phaseError)
+  const tasks = ctx.tasks ?? []
+  if (tasks.length === 0) return checkResult(check, 'fail', 'the plan at the anchor declares no tasks')
+  let changed
+  const problems = []
+  try {
+    changed = (await git.changedFiles({ base: anchorSha, branch: runSha })).map(normalizePath)
+    for (const hit of await lintCommittedInstructions(git, runSha, changed)) {
+      problems.push(`instruction security lint — ${JSON.stringify(hit.path)}:${hit.line}: ${hit.rule}`)
+    }
+  } catch (err) {
+    if (!(err instanceof GitError)) throw err
+    return checkResult(check, 'fail', `could not diff the run against its anchor: ${err.message}`)
+  }
+  const undeclared = filesetViolations(changed, tasks.flatMap((task) => task.files ?? []))
+  if (undeclared.length > 0) problems.push(`outside every task's declared set — ${undeclared.join(', ')}`)
+  const unmarked = protectedViolations(changed, check, { protectedFiles: tasks.flatMap((task) => task.protectedFiles ?? []) })
+  if (unmarked.length > 0) {
+    problems.push(`protected — ${unmarked.join(', ')} (mark it "Modify (protected)" in the plan, amended on the base branch, or revert it)`)
+  }
+  return problems.length === 0 ? checkResult(check, 'pass', '') : checkResult(check, 'fail', problems.join('\n'))
+}
+
 // git show <sha>:<path> fails when the path does not exist at that commit — a real absence,
 // not a git failure. `null` is a sentinel distinct from any real file content; every caller
 // compares it against another call of this same function, so the sentinel only ever meets
@@ -1852,6 +1889,42 @@ async function onFirstParentChain(git, tip, parent) {
 // Why an injected `ownership` may fail on a run nothing ever asked to be explained. It cannot say
 // which cause applies: knowing when this version was installed would need a record under
 // `.fleetmates/`, which is agent-writable and never consulted by an enforcement check.
+// THE RUN FIX BRANCHES. `fix --phase run` routes a blocking finding of the run review to one fix
+// task per round, `fix-<n>` on `fleetmates/<run>/fix-<n>`, cut from the run tip and merged --no-ff by
+// the integrator like a task branch. No plan task declares it, so without this rule its merge is
+// reachable from no task branch and every phase's `ownership` fails on an honest fix round.
+//
+// What admits one, computed from git and the anchored plan only (`.fleetmates/`, where the fix
+// task's own file set lives, is never read):
+//   - the branch is `fleetmates/<run>/fix-<n>` for n = 1, 2, … probed in order until the first that
+//     does not exist (a gap ends the probe, so a later fix branch behind it fails closed). No plan
+//     task can carry that id: the plan grammar builds every task id as `T<digits>`;
+//   - every existing plan task branch tip is an ancestor of it: it was cut after the whole plan
+//     was integrated, so it cannot carry work into a phase still in progress. One cut earlier holds
+//     a task tip short, and its merge stays unexplained;
+//   - what its merge may carry is the union of every plan task's declared files, protected paths
+//     only where some task marks them: the same bound `fileset-run` holds the whole run to. It is
+//     wider than any one task's set, which is the stated price: the file set `fix` emitted is run
+//     state, and so is not something this check may read.
+const RUN_FIX_BRANCH_LIMIT = 64
+
+async function runFixBranches(git, { runId, tasks, taskShas }) {
+  const declared = { files: (tasks ?? []).flatMap((task) => task?.files ?? []), protectedFiles: (tasks ?? []).flatMap((task) => task?.protectedFiles ?? []) }
+  const found = []
+  for (let n = 1; n <= RUN_FIX_BRANCH_LIMIT; n += 1) {
+    const id = `fix-${n}`
+    const branch = resolveTaskBranch({ id }, runId)
+    if (!branch || !(await git.branchExists(branch))) break
+    const sha = await git.resolveRef(`refs/heads/${branch}`)
+    let afterEveryTask = true
+    for (const taskSha of taskShas) {
+      if (!(await git.isAncestor(taskSha, sha))) { afterEveryTask = false; break }
+    }
+    if (afterEveryTask) found.push({ branch, sha, task: { id, ...declared } })
+  }
+  return found
+}
+
 const INJECTED_OWNERSHIP_NOTE = 'check injected: the manifest does not declare it; the commits above may predate this fleetmates version, or come from an inline run (use --no-fleet)'
 
 export async function runOwnershipCheck(check, ctx = {}) {
@@ -1870,6 +1943,12 @@ export async function runOwnershipCheck(check, ctx = {}) {
         shas.push(await git.resolveRef(`refs/heads/${branch}`))
         taskOf.push(task)
       }
+    }
+    // Admitted beside the plan's task branches, under the rule `runFixBranches` states.
+    for (const fix of await runFixBranches(git, { runId, tasks, taskShas: [...shas] })) {
+      branches.push(fix.branch)
+      shas.push(fix.sha)
+      taskOf.push(fix.task)
     }
 
     // Tolerated when it cannot be resolved: a run configured without a base branch, or with
@@ -2088,6 +2167,7 @@ const RUNNERS = Object.assign(Object.create(null), {
   tdd: runTestChangePolicy,
   fileset: runFilesetCheck,
   ownership: runOwnershipCheck,
+  'fileset-run': runFilesetRunCheck,
 })
 
 const MERGE_CHECK = { name: 'merge', kind: 'merge' }
@@ -2287,7 +2367,11 @@ export async function runChecks(checks, ctx = {}) {
   // the first teammate of a 3-task phase to run `complete` gets every sibling's branch merged
   // into its preview, so a sibling's stray commit — or a sibling branch that does not exist
   // yet — fails the preview and reads to that teammate as "my own work is broken".
-  const phaseTasks = scopedPhaseTasks(ctx)
+  // `ctx.runEntry` is `finish`'s run entry: no task branch is merged, and the preview is built
+  // anyway (`always`), so its `command` checks run on a clean tree of the run tip rather than in the
+  // operator's own worktree. Its inventory is skipped like a phase with no branches: there is
+  // nothing merged to compare against the baseline, which would be the same tree.
+  const phaseTasks = ctx.runEntry === true ? [] : scopedPhaseTasks(ctx)
   const branches = []
   try {
     for (const task of phaseTasks) {
@@ -2316,6 +2400,7 @@ export async function runChecks(checks, ctx = {}) {
       // — on exactly the behaviour it had.
       base: ctx.runBranchRef ?? ctx.runBranch,
       branches,
+      always: ctx.runEntry === true,
       link: ctx.previewLink ?? [],
       repoRoot: ctx.cwd,
       // Every check runs inside this callback, so the worktree is alive for all of them and
@@ -2335,7 +2420,7 @@ export async function runChecks(checks, ctx = {}) {
         // the difference between "not previewing" and "previewing somewhere this code
         // failed to recognise".
         const listed = await runCheckList(checks, ctx, path ?? ctx.cwd, false, path)
-        return [merged, ...await withInventory(checks, listed, ctx, path === null ? { reason: INVENTORY_NO_BRANCHES } : {})]
+        return [merged, ...await withInventory(checks, listed, ctx, path === null || branches.length === 0 ? { reason: INVENTORY_NO_BRANCHES } : {})]
       },
     })
   } catch (err) {

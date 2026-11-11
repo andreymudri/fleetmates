@@ -12,6 +12,7 @@
 // of work that was never wrong.
 
 import { printable } from './reviews.mjs'
+import { RUN_PHASE } from './gate-config.mjs'
 
 // The per-phase counterpart of `gate --results`. `finish` recomputes every phase, and every
 // phase with an `agent` check comes back pending, because nothing runs an agent check — so on
@@ -32,6 +33,9 @@ export function suppliedForPhase(supplied, phase) {
   return Array.isArray(entry?.results) ? entry.results : []
 }
 
+// The reserved key `run` carries the run entry's results (`checksForRun` in scripts/gate-config.mjs):
+// the review of the integrated diff, which belongs to no numbered phase. Only that exact spelling
+// is accepted; every other non-numeric key is refused as before.
 export function validateSuppliedPhases(supplied) {
   if (supplied === null || supplied === undefined) return null
   if (typeof supplied !== 'object' || Array.isArray(supplied)) {
@@ -44,6 +48,12 @@ export function validateSuppliedPhases(supplied) {
   }
   for (const [phase, entry] of Object.entries(byPhase)) {
     const asNumber = Number(phase)
+    if (phase === RUN_PHASE) {
+      if (!entry || typeof entry !== 'object' || !Array.isArray(entry.results)) {
+        return `--results phase ${RUN_PHASE} must be an object with a results array`
+      }
+      continue
+    }
     if (!Number.isInteger(asNumber)) return `--results names a non-numeric phase: ${JSON.stringify(phase)}`
     // A key that parses to a phase number but is not that number's OWN canonical string form
     // ('01', '1.0', ' 1', '1e0', '0x1', or '' — which `Number('')` coerces to 0) would match
@@ -62,6 +72,9 @@ export function validateSuppliedPhases(supplied) {
   return null
 }
 
+// The run entry (`phase: 'run'`), when `finish` computed one, is summarised like a phase: it lands
+// in `failedPhases` or `pendingPhases` under the name `run`, so a pending run review keeps the run
+// from being complete and the exit code splits failed from unverified the same way.
 export function summarizeRun(phaseResults = []) {
   const failedPhases = []
   const pendingPhases = []
@@ -107,29 +120,38 @@ export function renderRunSummary(runId, phaseResults = []) {
       ...(verdict.pending ?? []).map((n) => `pending: ${printable(n)}`),
       ...(verdict.skipped ?? []).map((n) => `skipped: ${printable(n)}`),
     ]
-    lines.push(`  phase ${entry.phase}   ${verdict.verdict ?? 'FAIL'}${entry.supplied ? ' (review supplied)' : ''}${blocking.length ? `   ${blocking.join(', ')}` : ''}`)
+    const label = entry.phase === RUN_PHASE ? RUN_PHASE : `phase ${entry.phase}`
+    lines.push(`  ${label}   ${verdict.verdict ?? 'FAIL'}${entry.supplied ? ' (review supplied)' : ''}${blocking.length ? `   ${blocking.join(', ')}` : ''}`)
   }
 
   // A test skipped at every gate is invisible to the verdict by design (standing skips never fail),
   // so the end of the run is where it is named: the rustot-stats case, five live assertions skipped
-  // at every gate because the environment was never provisioned.
-  const standing = phaseResults.at(-1)?.standing ?? []
+  // at every gate because the environment was never provisioned. The last NUMBERED phase's: the
+  // run entry runs no inventory against a baseline, so its list would always read empty.
+  const standing = phaseResults.filter((entry) => entry.phase !== RUN_PHASE).at(-1)?.standing ?? []
   if (standing.length > 0) {
     const units = [...new Set(standing.map((s) => s.unit))]
     lines.push(`standing skips at the last gate: ${standing.length} (units: ${units.map((u) => printable(u)).join(', ')})`)
   }
 
+  const hasRun = phaseResults.some((entry) => entry.phase === RUN_PHASE)
   if (summary.complete) {
-    lines.push('every phase passes: the run branch is ready to land')
+    lines.push(hasRun ? 'every phase and the run gate pass: the run branch is ready to land' : 'every phase passes: the run branch is ready to land')
     return lines.join('\n')
   }
 
   lines.push('not finished')
-  if (summary.failedPhases.length) {
-    lines.push(`  phases with a failing check: ${summary.failedPhases.join(', ')} — fix those, do not land`)
+  const numbered = (list) => list.filter((phase) => phase !== RUN_PHASE)
+  if (numbered(summary.failedPhases).length) {
+    lines.push(`  phases with a failing check: ${numbered(summary.failedPhases).join(', ')} — fix those, do not land`)
   }
-  if (summary.pendingPhases.length) {
-    lines.push(`  phases with an unverified check: ${summary.pendingPhases.join(', ')} — run those checks and supply them with gate --results; a check nobody ran is not a check that passed`)
+  if (numbered(summary.pendingPhases).length) {
+    lines.push(`  phases with an unverified check: ${numbered(summary.pendingPhases).join(', ')} — run those checks and supply them with gate --results; a check nobody ran is not a check that passed`)
+  }
+  if (summary.failedPhases.includes(RUN_PHASE)) {
+    lines.push('  the run gate fails on the integrated diff — fix it, do not land')
+  } else if (summary.pendingPhases.includes(RUN_PHASE)) {
+    lines.push('  the run review is unverified — review the integrated diff and supply it with finish --results under the key "run"; a check nobody ran is not a check that passed')
   }
   if (phaseResults.length === 0) {
     lines.push('  the plan produced no phases at all, so there is nothing verified here')

@@ -17,7 +17,7 @@ import { reconcileExecutionAttempt } from './execution-recovery.mjs'
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
 import { probeCapabilities } from './capability-preflight.mjs'
 import { validateEnvironmentRecipe, captureEnvironment } from './environment-preflight.mjs'
-import { checksForPhase } from './gate-config.mjs'
+import { checksForPhase, checksForRun, hasRunEntry, RUN_PHASE } from './gate-config.mjs'
 import { reviewStamp, reviewStale } from './reviews.mjs'
 import { taskBranchName } from './enforce.mjs'
 import { NAMES } from './names.mjs'
@@ -45,7 +45,7 @@ const FRAGMENT_FLAGS = {
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 const OUTPUT_BYTES = 4 * 1024 * 1024, FILE_BYTES = 1024 * 1024, SOURCE_BYTES = 512 * 1024, CLI_BYTES = 8 * 1024 * 1024
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/
-const WRITE_LINE = /^results written to (.+) — pass that path to gate --results$/
+const WRITE_LINE = /^results written to (.+) — pass that path to (gate|finish) --results$/
 const TRUST = ['Commands come only from the fixed workflow-profile fragments and the fixed fix-decision call, run as the absolute installed CLI with an explicit project root.',
   'Executor, capability and environment observations are local same-UID observations, not hostile-process isolation.',
   'An injected verification fixture never establishes completion; publication and remote effects are absent.',
@@ -160,22 +160,34 @@ const verifierNow = async cliPath => {
 const flagsWithin = (argv, allowed) => argv.slice(3).every(arg => !arg.startsWith('--') || allowed.includes(arg))
 // The fragment a step instantiates: `implement`, `review`, ... for the expanded steps, and the
 // explicit `name` a repair-round step carries (`repair`, `record`, `fix`, or the rerun fragment).
-const nameOf = step => step.name ?? step.id.replace(/-\d+$/, '')
+const nameOf = step => step.name ?? step.id.replace(/-(?:\d+|run)$/, '')
 
-function expectedStepIds(phases) {
-  return ['prepare', 'baseline', ...phases.flatMap(p => ['implement', 'review', 'collect', 'gate', 'integrate'].map(s => `${s}-${p}`)), 'acceptance', 'finish']
+// Where the manifest puts the mandatory review: on the run (`review-run` and `collect-run` after the
+// last integration), and on each phase whose gate still carries one, or on every phase when the run
+// has none. The same rule workflow-profile expands by, recomputed here from the committed manifest.
+const mandatoryReview = checks => checks.some(check => check.kind === 'agent' && check.optional !== true)
+function reviewPlan(manifest, phases) {
+  const run = hasRunEntry(manifest) && mandatoryReview(checksForRun(manifest))
+  return { run, phases: new Set(phases.filter(phase => !run || mandatoryReview(checksForPhase(manifest, String(phase))))) }
+}
+function expectedStepIds(phases, reviews) {
+  return ['prepare', 'baseline', ...phases.flatMap(p => (reviews.phases.has(p) ? ['implement', 'review', 'collect', 'gate', 'integrate'] : ['implement', 'gate', 'integrate']).map(s => `${s}-${p}`)),
+    ...(reviews.run ? [`review-${RUN_PHASE}`, `collect-${RUN_PHASE}`] : []), 'acceptance', 'finish']
 }
 // Independent structural validation: the expansion must be exactly the fixed fragment set, bound to
 // the inputs this controller read, with every argv on the CLI whitelist for its step.
-export function validateWorkflowExpansion(expanded, { inputs, request }) {
+export function validateWorkflowExpansion(expanded, { inputs, request, manifest }) {
   const { profileHash, ...rest } = expanded
   if (profileHash !== hash(JSON.stringify(rest)) || expanded.identity !== evidenceIdentity(inputs)
       || expanded.integration !== 'host-bounded' || expanded.mode !== 'dry-run') throw new Error('Expanded profile identity does not match its committed inputs')
+  if (!plainObject(manifest)) throw new Error('Expansion validation needs the committed manifest')
   const phases = expanded.phaseContracts.map(c => c.phase)
+  const reviews = reviewPlan(manifest, phases)
   const ids = expanded.steps.map(s => s.id)
-  if (JSON.stringify(ids) !== JSON.stringify(expectedStepIds(phases))) throw new Error('Expanded profile steps are not the fixed fragment set')
+  if (JSON.stringify(ids) !== JSON.stringify(expectedStepIds(phases, reviews))) throw new Error('Expanded profile steps are not the fixed fragment set')
   for (const step of expanded.steps) {
-    const kind = step.id.replace(/-\d+$/, '')
+    const kind = step.id.replace(/-(?:\d+|run)$/, '')
+    const own = /-(\d+|run)$/.exec(step.id)?.[1]
     if (kind === 'integrate') {
       if (step.kind !== 'host-integration' || step.mode !== 'host-bounded' || step.argv !== undefined) throw new Error('Integration must be host-bounded')
       continue
@@ -187,11 +199,16 @@ export function validateWorkflowExpansion(expanded, { inputs, request }) {
     const argv = step.argv
     if (!Array.isArray(argv) || argv.length > 32 || argv[0] !== 'node' || argv[1] !== 'scripts/cli.mjs' || argv[2] !== STEP_COMMAND[kind]
         || !COMMANDS.has(argv[2]) || argv.some(arg => !text(arg)) || argv.includes('--root') || !flagsWithin(argv, FRAGMENT_FLAGS[argv[2]])
-        || (kind === 'baseline' ? argv.length !== 3 : argv.indexOf('--run') < 0 || argv[argv.indexOf('--run') + 1] !== request.runId)) throw new Error(`Step ${step.id} is not a whitelisted CLI fragment`)
-    const phaseResults = `${NAMES.stateDir}/${request.runId}/reviews/results-${step.id.replace(/^\D+-/, '')}.json`
+        || (kind === 'baseline' ? argv.length !== 3 : argv.indexOf('--run') < 0 || argv[argv.indexOf('--run') + 1] !== request.runId)
+        // A phase step names its own phase, and the run's review steps name the run.
+        || (own !== undefined && argv[argv.indexOf('--phase') + 1] !== own)) throw new Error(`Step ${step.id} is not a whitelisted CLI fragment`)
+    const phaseResults = `${NAMES.stateDir}/${request.runId}/reviews/results-${own}.json`
     if (kind === 'collect' && step.resultsPath !== phaseResults) throw new Error('Unexpected review results path')
-    // The controller hands gate the path collect-reviews named, so the fragment must name that same file.
-    if (kind === 'gate' && (argv.indexOf('--results') < 0 || argv[argv.indexOf('--results') + 1] !== phaseResults)) throw new Error('gate must read the collected review results')
+    // The controller hands gate the path collect-reviews named, so the fragment must name that same
+    // file; a phase reviewed only by the run has no such file, and its gate reads none.
+    if (kind === 'gate' && (reviews.phases.has(Number(own))
+      ? argv.indexOf('--results') < 0 || argv[argv.indexOf('--results') + 1] !== phaseResults
+      : argv.includes('--results'))) throw new Error('gate must read the collected review results, and only when its phase is reviewed')
     if (kind === 'finish' && argv[argv.indexOf('--results') + 1] !== `${NAMES.stateDir}/${request.runId}/reviews/finish-results.json`) throw new Error('finish must receive the collected review results')
   }
   return phases
@@ -296,9 +313,29 @@ async function validateImplement(ctx, phase) {
   return { ok: true, artifacts }
 }
 function agentCheck(ctx, phase) {
-  return checksForPhase(ctx.manifest, String(phase)).find(check => check.kind === 'agent' && check.optional !== true)
+  const checks = phase === RUN_PHASE ? checksForRun(ctx.manifest) : checksForPhase(ctx.manifest, String(phase))
+  return checks.find(check => check.kind === 'agent' && check.optional !== true)
+}
+const runTipNow = ctx => refTip(ctx.root, `refs/heads/${ctx.request.runBranch}`)
+// The run review judged the run branch at one tip, stamped `<runBranch>@<sha>` as review-dispatch
+// --phase run resolved it from HEAD (the run branch, which the controller requires checked out).
+// Findings stamped for any other tip are stale: a commit on the run branch since the review voids it.
+async function runReviewsCurrent(ctx) {
+  const tip = runTipNow(ctx), artifacts = []
+  for (const lens of agentCheck(ctx, RUN_PHASE).lens) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(lens)) return { ok: false, reason: 'unsupported review lens name' }
+    const bytes = await readInside(ctx.root, `${NAMES.stateDir}/${ctx.request.runId}/reviews/${RUN_PHASE}-${lens}.json`)
+    const findings = bytes && parseJson(bytes)
+    if (!tip || !plainObject(findings) || !Array.isArray(findings.findings)
+        || reviewStale(findings, reviewStamp({ phase: RUN_PHASE, lens, tips: [`${ctx.request.runBranch}@${tip}`] })) !== null) {
+      return { ok: false, reason: `run review findings for lens ${lens} are missing, malformed or stamped for another run tip` }
+    }
+    artifacts.push({ kind: 'review-findings', bytes })
+  }
+  return { ok: true, tip, artifacts }
 }
 async function reviewsCurrent(ctx, phase) {
+  if (phase === RUN_PHASE) return runReviewsCurrent(ctx)
   const tips = currentTips(ctx, phase)
   if (JSON.stringify(tips) !== JSON.stringify(ctx.taskTips[phase] ?? null)) return { ok: false, reason: 'task tips moved after implementation' }
   const branchShas = Object.fromEntries(Object.entries(tips).map(([id, tip]) => [taskBranchName(ctx.request.runId, id), tip]))
@@ -317,23 +354,35 @@ async function reviewsCurrent(ctx, phase) {
 async function validateCollect(ctx, phase, step, output) {
   const matches = output.split(/\r?\n/).map(line => WRITE_LINE.exec(line)).filter(Boolean)
   const expected = path.join(ctx.root, step.resultsPath)
-  if (matches.length !== 1 || matches[0][1] !== expected) return { ok: false, reason: 'collect-reviews did not name the expected results path on its success line' }
+  // A phase's results go to gate --results; the run's are shaped for finish --results.
+  const consumer = phase === RUN_PHASE ? 'finish' : 'gate'
+  if (matches.length !== 1 || matches[0][1] !== expected || matches[0][2] !== consumer) return { ok: false, reason: 'collect-reviews did not name the expected results path on its success line' }
   const bytes = await readInside(ctx.root, step.resultsPath)
   const parsed = bytes && parseJson(bytes)
   const check = agentCheck(ctx, phase)
-  const result = plainObject(parsed) && Object.keys(parsed).length === 1 && Array.isArray(parsed.results)
-    ? parsed.results.filter(r => plainObject(r) && r.kind === 'agent' && r.name === check.name) : []
+  // The run's file is `{ "phases": { "run": { "results": [...] } } }` and nothing else.
+  const document = phase !== RUN_PHASE ? parsed
+    : plainObject(parsed) && Object.keys(parsed).length === 1 && plainObject(parsed.phases) && Object.keys(parsed.phases).length === 1
+      && plainObject(parsed.phases[RUN_PHASE]) && Object.keys(parsed.phases[RUN_PHASE]).length === 1 ? parsed.phases[RUN_PHASE] : null
+  const result = plainObject(document) && Object.keys(document).length === 1 && Array.isArray(document.results)
+    ? document.results.filter(r => plainObject(r) && r.kind === 'agent' && r.name === check.name) : []
   if (result.length !== 1 || !['pass', 'fail'].includes(result[0].status)) return { ok: false, reason: 'review results file is missing or malformed' }
   const reviews = await reviewsCurrent(ctx, phase)
   if (!reviews.ok) return reviews
-  ctx.reviewResults[phase] = { path: expected, sha256: hash(bytes), status: result[0].status, check: check.name, results: parsed.results }
+  ctx.reviewResults[phase] = { path: expected, sha256: hash(bytes), status: result[0].status, check: check.name, results: document.results,
+    ...(phase === RUN_PHASE ? { tip: reviews.tip } : {}) }
   if (result[0].status !== 'pass') {
-    return { ok: false, category: 'code', reason: 'mandatory review blocked', verdict: { verdict: 'FAIL', phase, results: parsed.results },
+    return { ok: false, category: 'code', reason: 'mandatory review blocked', verdict: { verdict: 'FAIL', phase, results: document.results },
       artifacts: [{ kind: 'review-results', bytes }] }
   }
   return { ok: true, artifacts: [{ kind: 'review-results', bytes }] }
 }
 async function gateInputsCurrent(ctx, phase) {
+  // A phase reviewed only by the run carries no review results into its gate: only its task tips.
+  if (!ctx.reviews.phases.has(phase)) {
+    if (JSON.stringify(currentTips(ctx, phase)) !== JSON.stringify(ctx.taskTips[phase])) return { ok: false, reason: 'task tips moved after implementation' }
+    return { ok: true, artifacts: [{ kind: 'gate-input', bytes: JSON.stringify({ version: 1, phase, results: null, taskTips: ctx.taskTips[phase] }) }] }
+  }
   const collected = ctx.reviewResults[phase]
   const bytes = collected && await readInside(ctx.root, path.relative(ctx.root, collected.path))
   if (!bytes || hash(bytes) !== collected.sha256 || collected.status !== 'pass') return { ok: false, reason: 'gate review input changed or is absent' }
@@ -402,6 +451,7 @@ async function repairDecision(ctx, failedStep, phase, failure, round) {
   ctx.report.repair = { phase, step: failedStep.id, decision, rounds: ctx.repairRounds }
   if (decision.decision === 'escalate') return { blocker: blocker('code', failedStep.id, `fix-escalated: ${decision.reason}`) }
   if (decision.decision !== 'retry') return { blocker: blocker('code', failedStep.id, 'fix-decision-none-for-a-failed-verdict') }
+  if (phase === RUN_PHASE) return runFixStop(ctx, failedStep, step, decision)
   const tasks = decision.tasks.map(task => task?.taskId)
   if (!repairTasksValid(ctx, phase, tasks) || decision.tasks.some(task => !Number.isSafeInteger(task.round) || task.round < 1)) {
     return { blocker: blocker('infrastructure', step.id, 'fix decision names no valid task of this phase') }
@@ -416,6 +466,24 @@ async function repairDecision(ctx, failedStep, phase, failure, round) {
     return { blocker: blocker('code', failedStep.id, `budget-exhausted: maxRepairRounds ${ctx.request.limits.maxRepairRounds}, phase repair limit ${contract.repair.maxRounds}, ${round} round(s) delivered${journal ? `, driver round limit ${DRIVER_ATTEMPTS - 1}` : ''}`) }
   }
   return { tasks, rounds: Object.fromEntries(decision.tasks.map(task => [task.taskId, task.round])) }
+}
+// A retry of the run is one `fix-<n>` task on `fleetmates/<run>/fix-<n>`, cut from the run tip as it
+// stands (`fix --phase run`). That task is no plan task: `dispatch` refuses `--phase run`, and the
+// host-bounded integration merges a phase's task branches only, so no fixed fragment can dispatch
+// or integrate it. The controller therefore stops there, naming the task, and records no round:
+// `record-fix-round --phase run` belongs to whoever dispatches it. A decision naming anything else,
+// or a round past min(maxRepairRounds, the run fix budget, 2), stops too.
+function runFixStop(ctx, failedStep, fixStep, decision) {
+  const [task] = decision.tasks
+  const id = /^fix-([1-9][0-9]*)$/.exec(typeof task?.taskId === 'string' ? task.taskId : '')
+  const cutFrom = `${ctx.request.runBranch}@${runTipNow(ctx)}`
+  if (decision.tasks.length !== 1 || !id || task.round !== Number(id[1]) || task.branch !== taskBranchName(ctx.request.runId, task.taskId)
+      || task.cutFrom !== cutFrom) return { blocker: blocker('infrastructure', fixStep.id, 'fix decision names no valid run fix task cut from the run tip') }
+  const limit = ctx.expanded.runContract.repair.maxRounds
+  if (task.round > Math.min(ctx.request.limits.maxRepairRounds, limit)) {
+    return { blocker: blocker('code', failedStep.id, `budget-exhausted: maxRepairRounds ${ctx.request.limits.maxRepairRounds}, run repair limit ${limit}, round ${task.round} decided`) }
+  }
+  return { blocker: blocker('code', failedStep.id, `run-fix-required: ${task.taskId} on ${task.branch}, cut from ${cutFrom}; this controller has no fragment that dispatches or integrates a run fix task`) }
 }
 function repairTasksValid(ctx, phase, tasks) {
   const ids = phaseTasks(ctx, phase).map(task => task.id)
@@ -439,7 +507,7 @@ function repairSteps(ctx, phase, round, plan) {
       argv: ['node', 'scripts/cli.mjs', 'record-fix-round', '--run', ctx.request.runId, '--phase', String(phase), '--task', id] })),
     { ...base('implement'), id: `repair-${phase}${suffix}`, name: 'repair', tasks: [...tasks],
       argv: [...base('implement').argv, '--fix-round', ...tasks.flatMap(id => ['--task', id])] },
-    ...['review', 'collect', 'gate', 'integrate'].map(name => ({ ...base(name), id: `${name}-${phase}${suffix}`, name })),
+    ...['review', 'collect', 'gate', 'integrate'].filter(name => base(name)).map(name => ({ ...base(name), id: `${name}-${phase}${suffix}`, name })),
   ]
 }
 // Each named task's tip after a fix round must descend from, and differ from, its tip just before it.
@@ -545,7 +613,7 @@ async function runCli(ctx, step, phase) {
     }
     if (step.argv[2] === 'gate') {
       const index = argv.indexOf('--results'), collected = ctx.reviewResults[phase]
-      argv = [...argv.slice(0, index + 1), collected.path, ...argv.slice(index + 2)]
+      if (index >= 0 && collected) argv = [...argv.slice(0, index + 1), collected.path, ...argv.slice(index + 2)]
       const current = await gateInputsCurrent(ctx, phase)
       if (!current.ok) return { ...current, category: 'changed-input', artifacts: [] }
     }
@@ -555,8 +623,17 @@ async function runCli(ctx, step, phase) {
       // supplied, so it receives the reviews collected in this invocation for every phase.
       const index = argv.indexOf('--results'), named = `${NAMES.stateDir}/${ctx.request.runId}/reviews/finish-results.json`
       if (index < 0 || argv[index + 1] !== named) throw new Error('finish results input is not the controller-written path')
-      if (ctx.phases.some(p => ctx.reviewResults[p]?.status !== 'pass')) return { ok: false, category: 'missing-artifact', reason: 'review results are not current for every phase', artifacts: [] }
-      const document = JSON.stringify({ phases: Object.fromEntries(ctx.phases.map(p => [String(p), { results: ctx.reviewResults[p].results }])) })
+      // The run review's results go in under the reserved key `run`, and only while the run is at
+      // the tip they judged: finish takes supplied results as they come, unstamped.
+      const reviewed = ctx.phases.filter(p => ctx.reviews.phases.has(p))
+      if (reviewed.some(p => ctx.reviewResults[p]?.status !== 'pass')) return { ok: false, category: 'missing-artifact', reason: 'review results are not current for every phase', artifacts: [] }
+      if (ctx.reviews.run) {
+        const run = ctx.reviewResults[RUN_PHASE]
+        if (run?.status !== 'pass') return { ok: false, category: 'missing-artifact', reason: 'the run review results are not current', artifacts: [] }
+        if (run.tip !== runTipNow(ctx)) return { ok: false, category: 'changed-input', reason: 'the run tip moved after the run review', artifacts: [] }
+      }
+      const document = JSON.stringify({ phases: Object.fromEntries([...reviewed.map(p => [String(p), { results: ctx.reviewResults[p].results }]),
+        ...(ctx.reviews.run ? [[RUN_PHASE, { results: ctx.reviewResults[RUN_PHASE].results }]] : [])]) })
       await writeInside(ctx.root, named, document)
       argv = [...argv.slice(0, index + 1), path.join(ctx.root, named), ...argv.slice(index + 2)]
       extra.push({ kind: 'finish-input', bytes: document })
@@ -822,12 +899,17 @@ async function obligations(ctx, finishReferences, acceptanceReferences) {
         refs: { [`refs/heads/${taskBranchName(ctx.request.runId, id)}`]: tip } }, stepArtifact(ids(phase).repair ?? ids(phase).implement, 'task-result'))
     }
     add({ id: `command-${phase}`, kind: 'command', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(ids(phase).gate, 'gate-input'))
-    add({ id: `review-${phase}`, kind: 'review', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(ids(phase).collect, 'review-results'))
+    if (ctx.reviews.phases.has(phase)) add({ id: `review-${phase}`, kind: 'review', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(ids(phase).collect, 'review-results'))
     add({ id: `integration-${phase}`, kind: 'integration', scope: 'step', tree: record.testedTree, refs: taskRefs }, stepArtifact(ids(phase).integrate, 'integration-receipt'))
   }
   const last = ctx.integrated[phases.at(-1)]
-  const finalReview = last.testedTree === finalTree && last.review.every(([, status]) => status === 'pass') && last.review.length > 0
-  add({ id: 'final-review', kind: 'review', scope: 'final', tree: finalTree, refs: { [runRef]: finalTip } }, finalReview ? stepArtifact(ids(phases.at(-1)).integrate, 'integration-receipt') : null)
+  // With a run review, the final review is that review: it passed and judged the final run tip.
+  // Otherwise it is the last phase's gate review, when that gate tested the final tree.
+  const run = ctx.reviewResults[RUN_PHASE]
+  const finalReview = ctx.reviews.run ? run?.status === 'pass' && run.tip === finalTip
+    : last.testedTree === finalTree && last.review.every(([, status]) => status === 'pass') && last.review.length > 0
+  const finalReviewArtifact = ctx.reviews.run ? stepArtifact(`collect-${RUN_PHASE}`, 'review-results') : stepArtifact(ids(phases.at(-1)).integrate, 'integration-receipt')
+  add({ id: 'final-review', kind: 'review', scope: 'final', tree: finalTree, refs: { [runRef]: finalTip } }, finalReview ? finalReviewArtifact : null)
   add({ id: 'final-command', kind: 'command', scope: 'final', tree: finalTree, refs: { [runRef]: finalTip } }, finishReferences?.find(a => a.kind === 'step-output' || a.kind === 'step-stdout') ?? null)
   for (const [criterion, reference] of acceptanceReferences) {
     add({ id: `acceptance-${criterion}`, kind: 'acceptance', scope: 'step', tree: finalTree, refs: { [runRef]: finalTip } }, reference)
@@ -889,6 +971,10 @@ async function executeSteps(ctx) {
     const stopped = await runPhase(ctx, contract.phase)
     if (stopped) return stop(ctx, stopped)
   }
+  if (ctx.reviews.run) {
+    const stopped = await runReview(ctx)
+    if (stopped) return stop(ctx, stopped)
+  }
   const acceptance = await acceptanceEvidence(ctx)
   ctx.report.acceptance = { required: ctx.acceptanceRequired, missing: acceptance.missing, tree: acceptance.finalTree }
   if (acceptance.missing.length) {
@@ -936,7 +1022,7 @@ async function runPhase(ctx, phase) {
   let plan = round ? await priorRepairTasks(ctx, phase, round) : null
   for (;;) {
     const steps = round ? repairSteps(ctx, phase, round, plan)
-      : ['implement', 'review', 'collect', 'gate', 'integrate'].map(name => ctx.expanded.steps.find(s => s.id === `${name}-${phase}`))
+      : ['implement', 'review', 'collect', 'gate', 'integrate'].map(name => ctx.expanded.steps.find(s => s.id === `${name}-${phase}`)).filter(Boolean)
     if (!steps) return { blocker: blocker('missing-artifact', `repair-${phase}.r${round}`, 'the retained fix decision for this repair round is missing or names no task of this phase') }
     let failure = null
     for (const step of steps) {
@@ -967,6 +1053,23 @@ async function runPhase(ctx, phase) {
     round += 1
     plan = next
   }
+}
+
+// The run review, after the last integration: dispatch the reviewers over the integrated diff,
+// collect their results against the run tip, and hand a blocked review to `fix --phase run`
+// (`runFixStop`). Returns null when the run review passed, or the stop.
+async function runReview(ctx) {
+  for (const name of ['review', 'collect']) {
+    const step = ctx.expanded.steps.find(s => s.id === `${name}-${RUN_PHASE}`)
+    const decision = ctx.resume ? await priorDecision(ctx, step, RUN_PHASE) : { action: 'run' }
+    if (decision.action === 'block') return decision
+    if (decision.action === 'reuse') continue
+    const result = await runCli(ctx, step, RUN_PHASE)
+    if (result.ok) continue
+    if (result.category !== 'code') return result
+    return repairDecision(ctx, step, RUN_PHASE, result, 0)
+  }
+  return null
 }
 
 function baseReport(ctx) {
@@ -1057,7 +1160,8 @@ async function controller({ root, cliPath, request: rawRequest, environment, rol
     capabilities: Object.fromEntries(probe.observations.map(o => [o.capability, o.state])),
     maxRepairRounds: request.limits.maxRepairRounds, maxWallMinutes: Math.ceil(request.limits.maxWallMs / 60000),
     integration: 'host-bounded', contracts: { environment, rolePolicy } })
-  ctx.phases = validateWorkflowExpansion(expanded, { inputs: ctx.inputs, request })
+  ctx.phases = validateWorkflowExpansion(expanded, { inputs: ctx.inputs, request, manifest: ctx.manifest })
+  ctx.reviews = reviewPlan(ctx.manifest, ctx.phases)
   ctx.expanded = expanded
   ctx.tasks = expanded.phaseContracts.flatMap(c => c.tasks.map(task => ({ ...task, phase: c.phase })))
   ctx.acceptanceRequired = expanded.steps.find(s => s.id === 'acceptance').inputs.filter(i => !i.startsWith('integrated-refs-'))

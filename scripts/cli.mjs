@@ -15,13 +15,13 @@ import { captureEnvironment, validateEnvironmentRecipe } from './environment-pre
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
 import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
-import { renderUsage } from './usage.mjs'
+import { renderUsage, annotateUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
 import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
-import { composeBrief } from './brief.mjs'
-import { inferGateConfig, checksForPhase, fixRoundsForPhase, previewLinks, reviewLenses } from './gate-config.mjs'
+import { composeBatchBrief, composeBrief } from './brief.mjs'
+import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
   getKey, setKey, unsetKey, ensureGitignored, ConfigError,
@@ -29,7 +29,7 @@ import {
 } from './config.mjs'
 import * as configModule from './config.mjs'
 import { TIERS, inferTier } from './routing.mjs'
-import { decideFix } from './fix-loop.mjs'
+import { decideFix, decideRunFix, runFixRoundsUsed } from './fix-loop.mjs'
 import { defaultExec, runCommandCheck, runChecks, aggregateVerdict } from './gate-runner.mjs'
 import { renderDigest } from './digest.mjs'
 import { collectDoctorReport, renderDoctor } from './doctor.mjs'
@@ -46,7 +46,7 @@ import { summarizeRun, renderRunSummary, renderPlanNotes, suppliedForPhase, vali
 import { selectPrunableWorktrees, renderPrunePlan, leakedPreviews } from './prune.mjs'
 import { previewOwnerMarkerPath, previewClaimPrefix } from './merge-preview.mjs'
 import { rebuildRunState } from './rebuild.mjs'
-import { generatePhaseWorkflow } from './workflow-gen.mjs'
+import { batchTasks, generatePhaseWorkflow } from './workflow-gen.mjs'
 import { createGit, GitError, defaultGitExec, gitDirWritable } from './git.mjs'
 import { getAdapter, HARNESS_NAMES } from './harnesses/index.mjs'
 import { dispatchPhase, waitForExit, runPool, killProcess, pidAlive } from './driver.mjs'
@@ -151,6 +151,7 @@ export function harnessSettings(resolved, harnessName, defaultSandbox = 'clone')
     network: entry.network ?? false,
     timeoutMinutes: entry.timeoutMinutes ?? 30,
     tierModels: entry.tierModels ?? {},
+    limitWaitMinutes: entry.limitWaitMinutes ?? 60,
   }
 }
 
@@ -162,7 +163,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|platform-sim|flaky|ci-wait|ci-local|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
@@ -194,6 +195,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   map      [--files <a,b>] [--commits <n>] [--top <n>] [--root <path>]
   map-notes --run <id> [--root <path>] [--write <path>]
   usage    [--session <id>] [--json] [--root <path>]
+  retro    --run <id> [--date <YYYY-MM-DD>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--plan <path>] [--base <branch>] [--root <path>]
@@ -203,8 +205,8 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   claim    --run <id> --task <id> --by <teammate> [--root <path>]
   unclaim  --run <id> --task <id> [--root <path>]
   locate   --run <id> --task <id> [--worktree <path>] [--branch <name>] [--root <path>]
-  brief    --run <id> --task <id> --plan <path> [--base <branch>] [--fix-round] [--root <path>]
-  workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>]
+  brief    --run <id> --task <id>... --plan <path> [--base <branch>] [--fix-round] [--root <path>]
+  workflow --run <id> --phase <n> [--root <path>] [--models <json>] [--plan <path>] [--base <branch>] [--out <path>]
   dispatch --run <id> --phase <n> [--harness <name>] [--plan <path>] [--base <branch>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>] [--fix-round --task <id>...] [--execution <absolute-json-path>]
   dispatch-reviews --run <id> [--phase <name>] [--harness <name>] [--models <json>] [--model <name>] [--effort <level>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
   dispatch-integrator --run <id> [--isolated-legacy] [--phase <name>] [--harness <name>] [--root <path>] [--environment <recipe-path>] [--role-policy <policy-path>]
@@ -550,6 +552,7 @@ export const REQUIRED = {
   map: [],
   // Belongs to no run either: the transcript store is keyed by session, not by run id.
   usage: [],
+  retro: ['run'],
   'map-notes': ['run'],
   digest: ['run'],
   diagram: ['run'],
@@ -611,7 +614,7 @@ export const KNOWN_FLAGS = {
   locate: ['run', 'task', 'worktree', 'branch'],
   brief: ['run', 'task', 'plan', 'base', 'fix-round'],
   complete: ['run', 'task', 'plan', 'base', 'phase', 'enforcement-only'],
-  workflow: ['run', 'phase', 'models', 'plan', 'base'],
+  workflow: ['run', 'phase', 'models', 'plan', 'base', 'out'],
   dispatch: ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy', 'fix-round', 'task', 'execution'],
   'dispatch-reviews': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'model', 'effort', 'environment', 'role-policy'],
   'dispatch-integrator': ['run', 'phase', 'harness', 'plan', 'base', 'models', 'environment', 'role-policy', 'isolated-legacy'],
@@ -649,6 +652,7 @@ export const KNOWN_FLAGS = {
   // `--run` reads a headless run's session store (`.fleetmates/<run>/sessions/*.json`); without
   // it `usage` still reads the Claude Code transcript store keyed by session.
   usage: ['session', 'json', 'run'],
+  retro: ['run', 'date', 'json'],
   'map-notes': ['run', 'write'],
   config: ['local'],
   'platform-sim': [],
@@ -677,6 +681,22 @@ function unknownFlags(command, flags) {
 const NAMED_PHASE_REFUSAL = '__named_phase__'
 
 const NUMERIC_PHASE_COMMANDS = new Set(['workflow', 'fix', 'record-fix-round', 'dispatch'])
+const RUN_FIX_COMMANDS = new Set(['fix', 'record-fix-round'])
+
+// The results a run verdict carries, or `undefined` when the document carries no run marker. Two
+// spellings carry it: a gate-shaped verdict whose `phase` is exactly `run` (what a caller builds
+// from the run entry, as the workflow controller does for a phase), and the `finish --results`
+// document `collect-reviews --phase run` writes, `{ "phases": { "run": { "results": [...] } } }`,
+// with no `phase` key beside it. A phase verdict carries neither, so it is never adjudicated as the
+// run, and a run verdict is never adjudicated as a phase (`fix` refuses both with exit 2).
+function runVerdictResults(verdict) {
+  if (!verdict || typeof verdict !== 'object' || Array.isArray(verdict)) return undefined
+  if (verdict.phase === RUN_PHASE) return verdict.results
+  if (Object.hasOwn(verdict, 'phase')) return undefined
+  const byPhase = verdict.phases
+  if (!byPhase || typeof byPhase !== 'object' || Array.isArray(byPhase) || !Object.hasOwn(byPhase, RUN_PHASE)) return undefined
+  return byPhase[RUN_PHASE]?.results
+}
 
 // `gate`'s exit when the only failed entries of its FAIL verdict are `derive` (no anchor or plan
 // state) and/or `run-state` (unreadable status.json or plan.json): no verdict about the code exists,
@@ -962,8 +982,12 @@ function missingArgs(command, flags, positional) {
   // comes back `escalate`/`unattributable` — "halt and ask the user" for what is only a
   // mistyped flag, with a genuine retry lost. `default` is the likeliest mistype of all: it
   // is the exact token `gate --phase` takes when omitted, and an operator carries it across.
+  // `fix` and `record-fix-round` also take the literal `run`: the run entry's fix route, whose
+  // rounds are counted under that key. `workflow` and `dispatch` dispatch plan tasks, and the run
+  // has none of its own, so for them `run` is refused like any other name.
   if (NUMERIC_PHASE_COMMANDS.has(command)
-    && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))) {
+    && flags.phase && flags.phase !== true && !Number.isInteger(Number(flags.phase))
+    && !(RUN_FIX_COMMANDS.has(command) && flags.phase === RUN_PHASE)) {
     // A `--no-fleet` gate names its phase from the manifest and emits a verdict carrying
     // `phaseName` with no integer `phase`, so this refusal is the whole of what an operator
     // following the phase-gate skill end to end sees. Reported as a boundary rather than as a
@@ -990,6 +1014,12 @@ function missingArgs(command, flags, positional) {
   if (RESULTS_COMMANDS.has(command)
     && (flags.results === true || (typeof flags.results === 'string' && flags.results.trim() === ''))) {
     missing.push('--results <path>')
+  }
+  // `workflow --out` the same way: a valueless or empty one would otherwise print the source to
+  // stdout, the very context the flag exists to keep it out of, with nothing said about why.
+  if (command === 'workflow' && flags.out !== undefined
+    && (flags.out === true || (typeof flags.out === 'string' && flags.out.trim() === ''))) {
+    missing.push('--out <path>')
   }
   return missing
 }
@@ -1764,10 +1794,15 @@ async function readSuppliedPhases(flags, io) {
 // is not its own canonical form is refused' in `tests/finish.test.mjs`; if it is ever loosened,
 // these keys need `printable` like every other quoted value here. The `phases` half of the
 // sentence is a list of integers `assignPhases` computed, never read from anything.
-function reportUnmatchedSuppliedPhases(io, supplied, phases) {
+//
+// The one non-numeric key that validator lets through is the literal `run`, which is this code's
+// own constant once matched. `withRun` says whether this run has a run entry to read it; without
+// one, a `run` block is unmatched evidence like any other.
+function reportUnmatchedSuppliedPhases(io, supplied, phases, { withRun = false } = {}) {
   const byPhase = supplied?.phases
   if (!byPhase || typeof byPhase !== 'object') return
   const real = new Set(phases.map((p) => String(p)))
+  if (withRun) real.add(RUN_PHASE)
   const unmatched = Object.keys(byPhase).filter((key) => !real.has(key))
   if (unmatched.length === 0) return
   io.out(
@@ -3017,6 +3052,7 @@ async function resolveGateConfig(root, io) {
 // having removed nothing, while `config get agents.implementer` printed `[object Object]`.
 const CONFIG_KEYS = [
   'maxParallel',
+  'batchSize',
   'caveman',
   ...ROLES.flatMap((role) => [`agents.${role}.tier`, `agents.${role}.effort`]),
   // The watchdog's knobs, so `get` and `unset` accept every key `set` already validates.
@@ -4476,8 +4512,27 @@ export async function runCli(argv, io = { out: console.log }) {
     }
     const plan = await readState(root, runId, 'plan')
     if (!plan) { io.out(`no run ${runId} — run init-run first`); return 4 }
-    const task = (plan.tasks ?? []).find((t) => t.id === flags.task)
-    if (!task) { io.out(`no task ${printable(flags.task)} in run ${runId}`); return 4 }
+    // Repeated `--task` composes one BATCH brief: the tasks in the order named, done by one
+    // teammate in one worktree, each on its own branch (docs/specs/2026-11-06-cost-cuts-design.md,
+    // section 5). A batch has one model and belongs to one phase, so tasks of different tiers or
+    // phases are refused rather than briefed together. One `--task` renders the single brief.
+    const named = repeated.task ?? [flags.task]
+    const repeatedId = named.find((id, i) => named.indexOf(id) !== i)
+    if (repeatedId !== undefined) { io.out(`--task names ${printable(repeatedId)} more than once`); return 2 }
+    const batch = []
+    for (const id of named) {
+      const found = (plan.tasks ?? []).find((t) => t.id === id)
+      if (!found) { io.out(`no task ${printable(id)} in run ${runId}`); return 4 }
+      batch.push(found)
+    }
+    for (const [field, label, rule] of [['tier', 'tiers', 'a batch runs on one model'], ['phase', 'phases', 'a batch belongs to one phase']]) {
+      if (new Set(batch.map((t) => t[field])).size > 1) {
+        const shown = batch.map((t) => `${printable(t.id)} ${field === 'phase' ? 'phase ' : ''}${printable(String(t[field] ?? '-'))}`).join(', ')
+        io.out(`--task names tasks of different ${label} (${shown}); ${rule}`)
+        return 2
+      }
+    }
+    const [task] = batch
 
     const contextAnchor = {}
     const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
@@ -4485,8 +4540,21 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const { learningBundles } = await import('./learning-context.mjs')
     let contextBundles
-    try { contextBundles = await learningBundles({ ...contextAnchor, tasks: [task] }) }
+    try { contextBundles = await learningBundles({ ...contextAnchor, tasks: batch }) }
     catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+    if (batch.length > 1) {
+      io.out(composeBatchBrief({
+        tasks: batch.map((t) => ({ ...t, branch: taskBranchName(runId, t.id) })),
+        contextBundles,
+        runId,
+        planPath,
+        baseBranch,
+        constraints: parseConstraints(planMarkdown),
+        caveman: resolved.caveman,
+        fixRound: flags['fix-round'] === true,
+      }))
+      return 0
+    }
     io.out(composeBrief({
       // `taskBranchName` is the single definition of `fleetmates/${runId}/${taskId}`, and the
       // gate resolves the branch through it. A brief restating the shape could name a ref
@@ -4524,7 +4592,13 @@ export async function runCli(argv, io = { out: console.log }) {
     // (parseFlags's boolean-switch reading), which is the value missing, not a value — coerced
     // through it would render the literal `true` as a plan path or a branch name.
     const planPath = flags.plan === true ? '' : (flags.plan ?? '')
-    const baseBranch = flags.base === true ? '' : (flags.base ?? '')
+    // An absent `--base` is derived the way `doctor` derives it (the one of main/master that
+    // exists). Measured on an eval run: an orchestrator that did not pass `--base` dispatched a
+    // batched phase whose six teammates all stopped at step 0 asking for one. Ambiguous or
+    // absent, the derivation fails and the brief keeps its no-base variant, as before.
+    const baseBranch = flags.base === true
+      ? ''
+      : (flags.base ?? await resolveBaseBranch(createGit({ cwd: root }), undefined).catch(() => ''))
 
     const contextAnchor = {}
     const planMarkdown = await planAtAnchor(root, planPath, flags, io, contextAnchor)
@@ -4620,8 +4694,34 @@ export async function runCli(argv, io = { out: console.log }) {
       constraints: parseConstraints(planMarkdown),
       caveman: resolved.caveman,
       effort: resolved.agents.implementer.effort ?? '',
+      batchSize: resolved.batchSize,
     })
-    io.out(src)
+    if (flags.out === undefined) {
+      io.out(src)
+      return 0
+    }
+    // `--out`: the source goes to the file and stdout carries only its path and one summary line,
+    // so the generated module never enters the context of whoever ran this. Resolved against
+    // `--root`, as `--plan` is, and written temp-then-rename so a reader never sees half a module.
+    const outPath = path.resolve(root, flags.out)
+    const temporary = `${outPath}.${process.pid}.tmp`
+    try {
+      await mkdir(path.dirname(outPath), { recursive: true })
+      await writeFile(temporary, `${src}\n`, { encoding: 'utf8', flag: 'wx' })
+      await rename(temporary, outPath)
+    } catch (err) {
+      await unlink(temporary).catch(() => {})
+      io.out(`cannot write the workflow to ${printable(outPath)}: ${printable(err.message)}`)
+      return 4
+    }
+    io.out(printable(outPath))
+    // The batches are named only when the phase is batched, so the orchestrator can brief the same
+    // batches on the direct-Agent path; an unbatched phase prints the line it always did.
+    const batches = batchTasks(phaseTasks, resolved.batchSize)
+    const batched = batches.some((b) => b.length > 1)
+      ? ` in ${batches.length} batch${batches.length === 1 ? '' : 'es'}: ${batches.map((b) => b.map((t) => printable(t.id)).join('+')).join(', ')}`
+      : ''
+    io.out(`workflow for run ${printable(runId)}, phase ${phase}: ${phaseTasks.length} task${phaseTasks.length === 1 ? '' : 's'}${batched}`)
     return 0
   }
 
@@ -4668,7 +4768,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
     // The probe is told the sandbox this dispatch will actually use, so a harness whose warning
     // depends on it (OpenCode's opt-in `none`) can say so before anything is spawned.
-    const { sandboxMode, network, timeoutMinutes, tierModels } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
+    const { sandboxMode, network, timeoutMinutes, tierModels, limitWaitMinutes } = harnessSettings(resolved, adapter.name, adapter.defaultSandbox)
     const probe = await adapter.probe({ sandboxMode })
     if (!probe.ok) { io.out(`${probe.reason}\n${probe.fix}`); return 2 }
     if (probe.warning) io.out(`warning: ${probe.warning}`)
@@ -4732,6 +4832,7 @@ export async function runCli(argv, io = { out: console.log }) {
       network,
       timeoutMinutes,
       tierModels,
+      limitWaitMinutes,
       effortFor: () => selected.effort ?? (resolved.agents.implementer.effort || undefined),
       composeBriefFor,
       personaFor: (role) => personaBodies[role],
@@ -6048,14 +6149,25 @@ export async function runCli(argv, io = { out: console.log }) {
     // written by the agents being enforced, so a phase deleted from that file would simply not
     // be verified — the check would report on whatever remained and call the run finished.
     const phases = [...new Set((ctx.tasks ?? []).map((t) => t.phase))].sort((a, b) => a - b)
-    reportUnmatchedSuppliedPhases(io, supplied, phases)
+    // The run entry: computed after the numbered phases, against the run tip, when the manifest
+    // scopes a review to the run or declares `phases.run` (`hasRunEntry`). Without either, `finish`
+    // is exactly what it was. Its supplied results are validated here, before any check runs, so a
+    // malformed run block is refused before minutes of phase checks rather than after them.
+    const runChecksList = hasRunEntry(config) ? checksForRun(config) : null
+    reportUnmatchedSuppliedPhases(io, supplied, phases, { withRun: runChecksList !== null })
+    const forRun = runChecksList ? suppliedForPhase(supplied, RUN_PHASE) : []
+    if (runChecksList) {
+      const invalid = validateSuppliedResults(forRun, runChecksList)
+      if (invalid) { io.out(`${RUN_PHASE}: ${invalid}`); return 2 }
+    }
+    const allChecks = [...phases.map((p) => checksForPhase(config, String(p))), ...(runChecksList ? [runChecksList] : [])]
 
     const enforcementOnly = flags['enforcement-only'] === true
     if (!enforcementOnly) {
-      const total = phases.reduce((n, p) => n + commandChecks(checksForPhase(config, String(p))).length, 0)
-      announceCommandChecks(io, 'finish', total, phases.length)
+      const total = allChecks.reduce((n, checks) => n + commandChecks(checks).length, 0)
+      announceCommandChecks(io, 'finish', total, allChecks.length)
     }
-    announceInjected(io, 'finish', injectedNames(phases.flatMap((p) => checksForPhase(config, String(p)))))
+    announceInjected(io, 'finish', injectedNames(allChecks.flat()))
 
     const phaseResults = []
     for (const phase of phases) {
@@ -6075,6 +6187,13 @@ export async function runCli(argv, io = { out: console.log }) {
       // reported one. It changes no verdict: aggregateVerdict stays the only producer of those.
       const standing = results.filter((r) => r?.kind === 'inventory').flatMap((r) => r.standing ?? [])
       phaseResults.push({ phase, supplied: forPhase.length > 0, verdict: aggregateVerdict(results), standing })
+    }
+    if (runChecksList) {
+      // `runEntry` builds the preview of the run tip with no task branch merged into it, so the
+      // `command` checks answer for the integrated run, and `fileset-run` diffs it against the
+      // anchor. The verdict is still `aggregateVerdict`'s, and an unsupplied review stays pending.
+      const results = mergeSuppliedResults(await runPhaseChecks(runChecksList, { ...ctx, runEntry: true }, enforcementOnly), forRun)
+      phaseResults.push({ phase: RUN_PHASE, supplied: forRun.length > 0, verdict: aggregateVerdict(results), standing: [] })
     }
 
     // No wrapper at this print site, because every value the table carries is wrapped where the
@@ -6211,11 +6330,15 @@ export async function runCli(argv, io = { out: console.log }) {
         return 0
       }
     }
+    // Prices, budget and context windows come from the `cost` config. Read before the store, so a
+    // malformed config is named rather than silently pricing nothing.
+    const usageConfig = await resolveConfig(root, io)
+    if (!usageConfig) return 2
     // Reads the harness's own transcript store, which is internal and may change: a failure to
     // find it is reported with the path rather than rendered as an empty table, because a table
     // of zeros reads as "this run cost nothing".
     try {
-      const report = await readSessionUsage({
+      const raw = await readSessionUsage({
         // CLAUDE_CONFIG_DIR is the harness's own variable for relocating that directory, so
         // honouring it is correct for a user who has moved it — and it is what lets this command
         // be tested against a fixture store instead of the developer's real transcripts.
@@ -6223,6 +6346,7 @@ export async function runCli(argv, io = { out: console.log }) {
         root,
         sessionId: typeof flags.session === 'string' && flags.session !== '' ? flags.session : null,
       })
+      const report = annotateUsage(raw, usageConfig.cost)
       // The JSON branch does not pass through `renderUsage`, so neutralising the table left this
       // one raw: `JSON.stringify` escapes the C0 range and leaves C1 and U+2028/U+2029 alone, and
       // U+009B is CSI to a terminal decoding C1. The values are read from a meta.json an agent can
@@ -6241,6 +6365,52 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(printable(err.message))
       return 1
     }
+  }
+
+  if (command === 'retro') {
+    // Proposals only: nothing is written. See scripts/retro.mjs for why its input is not evidence.
+    const date = typeof flags.date === 'string' ? flags.date : new Date().toISOString().slice(0, 10)
+    let plan, status
+    try {
+      plan = await readState(root, runId, 'plan')
+      status = await readState(root, runId, 'status')
+    } catch (err) {
+      io.out(`cannot read the state of run ${printable(String(runId))}: ${printable(err.message)}`)
+      return 2
+    }
+    if (!plan && !status) {
+      io.out(`no run ${printable(String(runId))} under ${NAMES.stateDir}/ (run init-run first)`)
+      return 2
+    }
+    // A headless run's per-task records. Absent for a Claude Code run, which is fine.
+    const sessions = []
+    const sessionsDir = path.join(runDir(root, runId), 'sessions')
+    let names = []
+    try { names = await readdir(sessionsDir) } catch { names = [] }
+    for (const name of names.filter((f) => f.endsWith('.json') && !f.endsWith('.schema.json') && !f.endsWith('.result.json')).sort()) {
+      try { sessions.push(JSON.parse(await readFile(path.join(sessionsDir, name), 'utf8'))) } catch { /* a torn record says nothing usable */ }
+    }
+    const { draftRetro } = await import('./retro.mjs')
+    let retro
+    try {
+      retro = draftRetro({ runId, date, plan, status, sessions })
+    } catch (err) {
+      io.out(printable(err.message))
+      return 2
+    }
+    if (flags.json === true) {
+      io.out(printableBlock(JSON.stringify({ runId, date, findings: retro.findings }, null, 2)))
+    } else if (retro.findings.length === 0) {
+      io.out(`run ${printable(String(runId))}: no fix rounds, failing gates, orphaned teammates or limit waits recorded; nothing to propose`)
+    } else {
+      io.out([
+        `run ${printable(String(runId))}: ${retro.findings.length} proposed learning(s). Nothing was written.`,
+        `Edit each Lesson line, then paste the entries worth keeping into fleetmates.learnings.md.`,
+        '',
+        retro.markdown,
+      ].join('\n'))
+    }
+    return 0
   }
 
   if (command === 'map') {
@@ -6490,9 +6660,13 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!config) { io.out('no gate manifest — cannot tell which lenses to dispatch'); return 4 }
 
     const phaseName = flags.phase ?? 'default'
-    const agentChecks = checksForPhase(config, phaseName).filter((c) => kindOf(c) === 'agent')
+    // `--phase run` is the run review: its checks are `checksForRun`'s, never a manifest block
+    // named `run` read through `checksForPhase`, and its diff is the run tip's, never a task set.
+    const runReview = phaseName === RUN_PHASE
+    const reviewChecks = runReview ? checksForRun(config) : checksForPhase(config, phaseName)
+    const agentChecks = reviewChecks.filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
-      io.out(`this phase declares ${agentChecks.length} agent checks; review-dispatch handles exactly one`)
+      io.out(`${runReview ? 'the run' : 'this phase'} declares ${agentChecks.length} agent checks; review-dispatch handles exactly one`)
       return 4
     }
     const check = agentChecks[0]
@@ -6515,10 +6689,11 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const git = createGit({ cwd: root })
     // Resolved to shas as well as names: the stamp each reviewer carries back names the tips it
-    // judged, and `collect-reviews` compares that against the tips as they stand then.
-    const branchShas = await resolveBranchShas(git, tasksOfPhase(plan, phaseName), runId)
+    // judged, and `collect-reviews` compares that against the tips as they stand then. The run
+    // review names no task branch: its one tip is the run branch's, resolved from HEAD below.
+    const branchShas = runReview ? {} : await resolveBranchShas(git, tasksOfPhase(plan, phaseName), runId)
     const branches = Object.keys(branchShas)
-    if (branches.length === 0) {
+    if (!runReview && branches.length === 0) {
       // Refused rather than emitted: reviewers dispatched over branches that do not exist grade
       // an empty diff and report no findings, which is indistinguishable from a clean review.
       io.out(`no task branch of phase ${phaseName} exists yet — there is no diff to review`)
@@ -6539,7 +6714,7 @@ export async function runCli(argv, io = { out: console.log }) {
     // choice; it does not make the value trusted. Nothing screens the run string: containment is
     // structural, and `generateReviewDispatch` emits it as a JSON literal in a DATA block that
     // sits below every instruction, so no value of it can become one.
-    const commandChecks = checksForPhase(config, phaseName).filter((c) => kindOf(c) === 'command')
+    const commandChecks = reviewChecks.filter((c) => kindOf(c) === 'command')
     const namedTest = commandChecks.filter((c) => c.name === 'test')
     const commandCheck = namedTest.length === 1
       ? namedTest[0]
@@ -6598,8 +6773,12 @@ export async function runCli(argv, io = { out: console.log }) {
     try {
       const { learningBundles } = await import('./learning-context.mjs')
       const baseBranch = await resolveBaseBranch(git, flags.base)
-      const commit = await git.mergeBase(await git.resolveRef(`refs/heads/${baseBranch}`), await git.resolveRef(head.ref))
-      const contextTask = { id: `phase-${phaseName}`, members: tasksOfPhase(plan, phaseName).map(t => t.id), files: [...new Set(tasksOfPhase(plan, phaseName).flatMap(t => t.files ?? []))] }
+      const tipSha = await git.resolveRef(head.ref)
+      const commit = await git.mergeBase(await git.resolveRef(`refs/heads/${baseBranch}`), tipSha)
+      // The run's review covers every task of the plan, named here directly rather than through
+      // `tasksOfPhase`, whose every-branch reading of a non-integer name is a phase-key fallback.
+      const reviewedTasks = runReview ? (Array.isArray(plan.tasks) ? plan.tasks : []) : tasksOfPhase(plan, phaseName)
+      const contextTask = { id: `phase-${phaseName}`, members: reviewedTasks.map(t => t.id), files: [...new Set(reviewedTasks.flatMap(t => t.files ?? []))] }
       const contextPlanPath = typeof flags.plan === 'string' ? flags.plan : (typeof plan.planPath === 'string' ? plan.planPath : null)
       const contextBundles = await learningBundles({ git, commit, planPath: contextPlanPath && path.isAbsolute(contextPlanPath) ? path.relative(root, contextPlanPath).split(path.sep).join('/') : contextPlanPath, tasks: [contextTask], role: 'reviewer' })
       spec = generateReviewDispatch({
@@ -6646,6 +6825,12 @@ export async function runCli(argv, io = { out: console.log }) {
         testCommandName,
         linkPaths,
         branchShas,
+        // The run review: the diff is merge-base(base, run)..run pinned to these two shas, and the
+        // stamp names the run tip as `<runBranch>@<sha>`, which `collect-reviews --phase run`
+        // recomputes. The name is wrapped for the reason `runBranch` above is, on both sides.
+        integrated: runReview
+          ? { baseBranch: printable(baseBranch), mergeBaseSha: commit, tipSha, tips: [`${printable(head.name)}@${tipSha}`] }
+          : null,
       })
     } catch (err) {
       // `generateReviewDispatch` throws `validateLinkPaths`'s message among others, which quotes
@@ -6872,10 +7057,11 @@ export async function runCli(argv, io = { out: console.log }) {
     // the lens list is what decides whether a review is complete.
     if (!config) { io.out('no gate manifest — cannot tell which lenses were dispatched'); return 4 }
 
-    const checks = checksForPhase(config, phaseName)
+    const runReview = phaseName === RUN_PHASE
+    const checks = runReview ? checksForRun(config) : checksForPhase(config, phaseName)
     const agentChecks = checks.filter((c) => kindOf(c) === 'agent')
     if (agentChecks.length !== 1) {
-      io.out(`this phase declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
+      io.out(`${runReview ? 'the run' : 'this phase'} declares ${agentChecks.length} agent checks; collect-reviews handles exactly one`)
       return 4
     }
     const check = agentChecks[0]
@@ -6990,29 +7176,51 @@ export async function runCli(argv, io = { out: console.log }) {
       io.out(`no plan for run ${printable(runId)} — nothing says which branch tips this phase is at, and a findings file that cannot be vouched for is not a review`)
       return 4
     }
-    let branchShas
-    try {
-      branchShas = await resolveBranchShas(createGit({ cwd: root }), tasksOfPhase(plan, phaseName), runId)
-    } catch (err) {
-      if (!(err instanceof GitError)) throw err
-      io.out(`cannot read this phase's task branches: ${err.message}`)
-      return 4
+    let expected
+    if (runReview) {
+      // The run review judged the run tip, as `review-dispatch --phase run` resolved it from HEAD:
+      // recomputed here the same way, so any commit on the run branch since then makes the
+      // findings stale. A HEAD that names no branch names no run tip, and is refused.
+      try {
+        const git = createGit({ cwd: root })
+        const head = await git.headBranch()
+        if (!head.ok) {
+          io.out(`${head.reason} — there is no run tip to match the findings against; check out the run branch and re-run`)
+          return 4
+        }
+        const tipSha = await git.resolveRef(head.ref)
+        expected = reviewStamp({ phase: RUN_PHASE, lens: null, tips: [`${printable(head.name)}@${tipSha}`] })
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        io.out(`cannot read the run tip: ${printable(err.message)}`)
+        return 4
+      }
+    } else {
+      let branchShas
+      try {
+        branchShas = await resolveBranchShas(createGit({ cwd: root }), tasksOfPhase(plan, phaseName), runId)
+      } catch (err) {
+        if (!(err instanceof GitError)) throw err
+        io.out(`cannot read this phase's task branches: ${err.message}`)
+        return 4
+      }
+      if (Object.keys(branchShas).length === 0) {
+        // The mirror of `review-dispatch`'s refusal: with no branch there was no diff to review,
+        // so any file claiming to have reviewed one describes something else entirely.
+        io.out(`no task branch of phase ${phaseName} exists — there was no diff to review`)
+        return 4
+      }
+      expected = reviewStamp({ phase: phaseName, lens: null, branchShas })
     }
-    if (Object.keys(branchShas).length === 0) {
-      // The mirror of `review-dispatch`'s refusal: with no branch there was no diff to review,
-      // so any file claiming to have reviewed one describes something else entirely.
-      io.out(`no task branch of phase ${phaseName} exists — there was no diff to review`)
-      return 4
-    }
-    const expected = reviewStamp({ phase: phaseName, lens: null, branchShas })
 
     const collected = collectReviewResults({
       checkName: check.name,
       lenses,
       files,
       blockOn: check.blockOn ?? ['high'],
-      // `lens` is filled in per file by collectReviewResults; phase and branches are the run's.
-      expected: { phase: phaseName, branches: expected.branches },
+      // `lens` is filled in per file by collectReviewResults; phase and branches (or, for the run
+      // review, the run tip under `tips`) are the run's.
+      expected: runReview ? { phase: RUN_PHASE, tips: expected.tips } : { phase: phaseName, branches: expected.branches },
     })
     if (collected.stale.length > 0) {
       // Reported the way `missing` is, and for the same reason: a stale review is a review this
@@ -7070,7 +7278,9 @@ export async function runCli(argv, io = { out: console.log }) {
     // too, and `gate --results` JSON.parses the whole file, so the redirect yields `--results must
     // be a readable JSON file` (measured on this branch). The file written below is the path to
     // pass instead, which is what makes the redirect unnecessary.
-    const document = JSON.stringify({ results: collected.results }, null, 2)
+    // The run review's file is shaped for `finish --results`, which is where the run entry's
+    // results go: `{ "phases": { "run": { "results": [...] } } }`, passable as it stands.
+    const document = JSON.stringify(runReview ? { phases: { [RUN_PHASE]: { results: collected.results } } } : { results: collected.results }, null, 2)
     io.out(document)
 
     // TEMP-THEN-RENAME, matching `writeState` in `scripts/state.mjs`, because a plain `writeFile`
@@ -7126,10 +7336,10 @@ export async function runCli(argv, io = { out: console.log }) {
       // looking for a path that does not exist. Wrapped for the reason `configFailureMessage`'s
       // syscall branch is: a Node fs error quotes the path this CLI built, and nothing that
       // reaches a terminal should carry bytes unfiltered.
-      io.out(`cannot write the results file at ${printable(resultsPath)}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to gate --results`)
+      io.out(`cannot write the results file at ${printable(resultsPath)}: ${printable(err.message)} — the results above are complete; redirect them to a file and pass that to ${runReview ? 'finish' : 'gate'} --results`)
       return 4
     }
-    io.out(`results written to ${printable(resultsPath)} — pass that path to gate --results`)
+    io.out(`results written to ${printable(resultsPath)} — pass that path to ${runReview ? 'finish' : 'gate'} --results`)
     return 0
   }
 
@@ -7156,11 +7366,12 @@ export async function runCli(argv, io = { out: console.log }) {
       return 3
     }
     const phaseName = flags.phase ?? 'default'
-    const all = checksForPhase(config, phaseName)
     // `=== true`, matching missingArgs: the two must agree about what counts as solo, or one
     // of them drops --run and --plan from the requirements while the other still runs the
     // enforcement checks, or vice versa.
     const solo = flags['no-fleet'] === true
+    // A solo gate keeps a run-scoped review in its own list: nothing computes a run entry after it.
+    const all = checksForPhase(config, phaseName, { solo })
 
     // --no-fleet is the only way the enforcement checks are skipped, and the caller must
     // say it. Inferring "solo" from missing state let deleting one file record a PASS.
@@ -7479,6 +7690,56 @@ export async function runCli(argv, io = { out: console.log }) {
       return 1
     }
 
+    // THE RUN FIX ROUTE (`--phase run`): the run entry's verdict becomes one fix task, `fix-<n>`,
+    // on `fleetmates/<run>/fix-<n>` cut from the run tip (`decideRunFix`). The verdict must carry
+    // the run marker (`runVerdictResults`); rounds come from the run's own counter, which
+    // `record-fix-round --phase run` writes; the budget is `phases.run`'s `fixRounds`, else the
+    // default block's, capped at two.
+    if (flags.phase === RUN_PHASE) {
+      const runResults = runVerdictResults(verdict)
+      if (runResults === undefined) {
+        io.out(`--phase run needs a run verdict, and ${printable(flags.verdict)} carries no run marker: a run verdict has "phase": "run", or is the { "phases": { "run": ... } } file collect-reviews --phase run writes\n\n${USAGE}`)
+        return 2
+      }
+      const runConfig = await resolveGateConfig(root, io)
+      if (runConfig === GATE_CONFIG_REJECTED) return 2
+      const reviews = checksForRun(runConfig ?? {}).filter((check) => kindOf(check) === 'agent')
+      const decision = decideRunFix({ results: runResults }, {
+        runId,
+        tasks: Array.isArray(plan.tasks) ? plan.tasks : [],
+        rounds: readFixRounds(status, RUN_PHASE),
+        fixRounds: fixRoundsForPhase(runConfig ?? {}, RUN_PHASE),
+        blockOn: Object.fromEntries(reviews.map((check) => [check.name, Array.isArray(check.blockOn) ? check.blockOn : ['high']])),
+      })
+      if (decision.decision === 'retry') {
+        // The fix branch is cut from the run tip as it stands: the run branch HEAD names, the same
+        // branch `review-dispatch --phase run` reviewed. Read from git, never from run state.
+        let head
+        try {
+          const git = createGit({ cwd: root })
+          head = await git.headBranch()
+          if (head.ok) head = { ...head, sha: await git.resolveRef(head.ref) }
+        } catch (err) {
+          if (!(err instanceof GitError)) throw err
+          io.out(`cannot read the run tip to cut the fix branch from: ${printable(err.message)}`)
+          return 1
+        }
+        if (!head.ok) {
+          io.out(`${head.reason} — there is no run tip to cut the fix branch from; check out the run branch and re-run`)
+          return 1
+        }
+        for (const task of decision.tasks) task.cutFrom = `${printable(head.name)}@${head.sha}`
+      }
+      // Wrapped: the findings are a reviewer's own text, and `JSON.stringify` leaves the C1 range
+      // and U+2028/U+2029 raw, so a finding could otherwise draw a line of its own.
+      io.out(printableBlock(JSON.stringify({ ...decision, phase: RUN_PHASE }, null, 2)))
+      return 0
+    }
+    if (runVerdictResults(verdict) !== undefined) {
+      io.out(`--phase ${printable(flags.phase)} does not match the run verdict at ${printable(flags.verdict)}: adjudicate it with --phase run\n\n${USAGE}`)
+      return 2
+    }
+
     // Validated as an integer by missingArgs, then normalised: `--phase 01` and `--phase 1`
     // must select the same tasks and read the same round counter, not two disjoint string
     // keys. Every phase comparison below this line is numeric.
@@ -7543,6 +7804,21 @@ export async function runCli(argv, io = { out: console.log }) {
     if (!plan) { io.out(`no plan for run ${runId}`); return 1 }
     const status = await readState(root, runId, 'status')
     if (!status) { io.out(`no status for run ${runId}`); return 1 }
+
+    // The run's fix rounds: one `fix-<n>` task per round, numbered by the rounds already recorded,
+    // so only the next one may be recorded. Recording the same dispatch twice would spend a round
+    // no retry used, which is what keeping this write separate from `fix` exists to prevent.
+    if (flags.phase === RUN_PHASE) {
+      const expected = `fix-${runFixRoundsUsed(readFixRounds(status, RUN_PHASE)) + 1}`
+      if (flags.task !== expected) {
+        io.out(`the next run fix task is ${expected}, not ${printable(flags.task)} — record a run fix round once, when that task is dispatched`)
+        return 1
+      }
+      const next = recordFixRound(status, RUN_PHASE, flags.task)
+      await writeState(root, runId, 'status', next)
+      io.out(`${flags.task} run round ${runFixRoundsUsed(readFixRounds(next, RUN_PHASE))}`)
+      return 0
+    }
 
     // A round is spent against a budget that belongs to one task in one phase, so the pair
     // must exist in the plan. This also keeps an arbitrary caller-supplied string — say
@@ -7727,6 +8003,7 @@ export async function runCli(argv, io = { out: console.log }) {
         const { resolved, sources } = await loadValidatedConfig(root)
         io.out(`maxParallel  ${resolved.maxParallel}  (${sources.maxParallel})`)
         io.out(`caveman      ${resolved.caveman}  (${sources.caveman})`)
+        io.out(`batchSize    ${resolved.batchSize}  (${sources.batchSize})`)
         for (const role of ROLES) {
           const entry = resolved.agents[role]
           // Provenance is per FIELD, not per role: a role whose tier comes from the tracked
