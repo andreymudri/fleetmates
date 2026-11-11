@@ -67,6 +67,21 @@ reviewers about 17%. The changes below cut those two shares.
   teammate. Limits: a batch's tasks run in sequence, so a phase takes longer; the `SubagentStop`
   hook checks a stop against the batch's latest located task only; a teammate that dies mid-batch
   leaves its later tasks `orphaned`.
+- `usage` shows each subagent's peak context. With the new `cost` config it prices each subagent
+  per million tokens in your currency (`cost.prices`, with `*` as a fallback), shows the peak as a
+  share of the model's window (`cost.contextWindows`, `!` at 85% or more), and warns at 80% and
+  100% of `cost.budget`. The budget never stops a run or changes an exit code.
+- A headless teammate whose turn ends on a retriable provider limit is waited out and continued in
+  the same session, instead of being orphaned. `harnesses.<name>.limitWaitMinutes` caps a wait
+  (default 60, 0 turns it off). Only OpenCode names its errors today.
+- `retro --run <id>` prints proposed learnings from a run's fix rounds, failing gates, orphaned or
+  failed teammates and limit waits, in the `fleetmates.learnings.md` format. It writes nothing.
+
+### Fixed
+
+- `usage` counts an assistant message once. Claude Code writes one transcript line per content
+  block, each repeating the message's id and usage, so turns, output and cache tokens were summed
+  two or three times over, and a priced report came out about double.
 
 ## v2.8.0
 

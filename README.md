@@ -185,6 +185,20 @@ Seeing what is actually there:
   changed too late to reach the work
 - `digest --run <id>` — the compact fleet status board
 
+Cost and retrospective:
+
+- `usage [--session <id>]` — tokens per subagent of a Claude Code session: turns, fixed prefix,
+  cache reads, output and the **peak** context any one turn carried. With `cost.prices` set it adds
+  a cost column in your currency, and with `cost.contextWindows` it shows each agent's peak as a
+  share of its window, marking 85% or more with `!`. With `cost.budget` it warns at 80% and when
+  the budget is used up. The budget only warns: the exit code does not change and nothing stops.
+  The cost is an estimate from tokens at your prices, not the provider's bill
+- `retro --run <id>` — proposed learnings from what the run recorded: fix rounds per task, a gate
+  last recorded failing, teammates that were orphaned or failed, and provider-limit waits. It prints
+  entries in the `fleetmates.learnings.md` heading format (`--json` gives findings in the shape
+  `feedback-draft` takes) and writes nothing. The run state it reads is written by the run's own
+  agents, so it is a list of places to look, not evidence; you write the lesson
+
 Reviews:
 
 - `review-dispatch --run <id>` — generate the reviewer dispatches from the manifest, with the tier,
@@ -252,6 +266,16 @@ and nothing else:
 | `caveman` | `false \| "lite" \| "full" \| "ultra"` | `false` |
 | `agents.<role>.tier` | `"cheap" \| "mid" \| "capable"` | unset — see below |
 | `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits the session's |
+| `cost.currency` | 1 to 8 letters, such as `"USD"` or `"CNY"` | `"USD"` |
+| `cost.budget` | number > 0, in `cost.currency` | unset (no warning) |
+| `cost.prices` | `{ "<model>" \| "*": { input, output, cacheRead, cacheWrite } }`, per million tokens | unset (no cost column) |
+| `cost.contextWindows` | `{ "<model>" \| "*": tokens }` | unset (no `ctx%` column) |
+| `harnesses.<name>.limitWaitMinutes` | integer 0 to 1440; 0 turns the wait off | `60` |
+
+The `cost` keys only feed the `usage` report and are allowed in either file. `cost.prices` and
+`cost.contextWindows` are objects, so they are hand-edited; all four prices of a model are
+required, because a missing cache price read as zero would understate the largest part of a
+fleet's tokens. A model with no price shows `?` and is left out of the total, which then says so.
 
 `<role>` is `implementer` or `integrator` in the local file; `reviewer` is accepted only in the
 tracked manifest. An unknown key, or an enforcement key in the local file, is a hard error naming

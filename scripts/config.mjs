@@ -223,7 +223,7 @@ export function validateHarnesses(harnesses, file) {
       throw new ConfigError(`harnesses.${name} must be an object`)
     }
     for (const field of Object.keys(entry)) {
-      if (!['sandbox', 'network', 'timeoutMinutes', 'tierModels'].includes(field)) {
+      if (!['sandbox', 'network', 'timeoutMinutes', 'tierModels', 'limitWaitMinutes'].includes(field)) {
         throw new ConfigError(`unknown key in ${file}: harnesses.${name}.${field}`)
       }
     }
@@ -243,12 +243,79 @@ export function validateHarnesses(harnesses, file) {
       && (!Number.isInteger(entry.timeoutMinutes) || entry.timeoutMinutes < 1)) {
       throw new ConfigError(`harnesses.${name}.timeoutMinutes must be an integer >= 1`)
     }
+    // How long the driver may wait out a provider limit before it gives the task up as orphaned.
+    // 0 turns the wait off. Capped at a day: a limit that resets later than that is a spend limit
+    // or an empty balance in practice, and waiting does not fix either.
+    if (entry.limitWaitMinutes !== undefined
+      && (!Number.isInteger(entry.limitWaitMinutes) || entry.limitWaitMinutes < 0 || entry.limitWaitMinutes > 1440)) {
+      throw new ConfigError(`harnesses.${name}.limitWaitMinutes must be an integer from 0 to 1440`)
+    }
     if (entry.tierModels !== undefined
       && (entry.tierModels === null || typeof entry.tierModels !== 'object'
         || Array.isArray(entry.tierModels))) {
       throw new ConfigError(`harnesses.${name}.tierModels must be an object`)
     }
   }
+}
+
+// What the `usage` report prices and warns about. Not an enforcement key: nothing here changes a
+// verdict or stops a run (the budget only warns), so both layers may carry it. Prices are per
+// million tokens in `currency`, keyed by the model name the report shows, with `*` as the fallback
+// for any model not listed (the usual entry for a fleet pointed at one provider, such as DeepSeek).
+const PRICE_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite']
+const MAX_MODEL_KEY = 128
+
+function costModelKey(key, where) {
+  if (key === '' || key.length > MAX_MODEL_KEY || /[\p{C}]/u.test(key)) {
+    throw new ConfigError(`${where} keys must be model names of 1 to ${MAX_MODEL_KEY} printable characters`)
+  }
+}
+
+function plainObject(v) {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+}
+
+export function validateCost(cost, file) {
+  if (!plainObject(cost)) throw new ConfigError('cost must be an object')
+  for (const field of Object.keys(cost)) {
+    if (!['currency', 'prices', 'budget', 'contextWindows'].includes(field)) {
+      throw new ConfigError(`unknown key in ${file}: cost.${field}`)
+    }
+  }
+  if (cost.currency !== undefined && (typeof cost.currency !== 'string' || !/^[A-Za-z]{1,8}$/.test(cost.currency))) {
+    throw new ConfigError('cost.currency must be 1 to 8 letters, such as USD or CNY')
+  }
+  if (cost.budget !== undefined && !(typeof cost.budget === 'number' && Number.isFinite(cost.budget) && cost.budget > 0)) {
+    throw new ConfigError('cost.budget must be a number > 0')
+  }
+  if (cost.prices !== undefined) {
+    if (!plainObject(cost.prices)) throw new ConfigError('cost.prices must be an object keyed by model')
+    for (const [model, price] of Object.entries(cost.prices)) {
+      costModelKey(model, 'cost.prices')
+      if (!plainObject(price)) throw new ConfigError(`cost.prices.${model} must be an object`)
+      for (const field of Object.keys(price)) {
+        if (!PRICE_FIELDS.includes(field)) throw new ConfigError(`unknown key in ${file}: cost.prices.${model}.${field}`)
+      }
+      // All four, never a default. A missing cache price read as 0 would understate exactly the
+      // category that dominates a fleet run's tokens (see scripts/usage.mjs).
+      for (const field of PRICE_FIELDS) {
+        const value = price[field]
+        if (!(typeof value === 'number' && Number.isFinite(value) && value >= 0)) {
+          throw new ConfigError(`cost.prices.${model}.${field} must be a number >= 0 (price per million tokens)`)
+        }
+      }
+    }
+  }
+  if (cost.contextWindows !== undefined) {
+    if (!plainObject(cost.contextWindows)) throw new ConfigError('cost.contextWindows must be an object keyed by model')
+    for (const [model, size] of Object.entries(cost.contextWindows)) {
+      costModelKey(model, 'cost.contextWindows')
+      if (!Number.isInteger(size) || size < 1000) {
+        throw new ConfigError(`cost.contextWindows.${model} must be an integer >= 1000 (tokens)`)
+      }
+    }
+  }
+  return cost
 }
 
 // The watchdog's knobs. Not an enforcement key: nothing here changes a verdict, it only decides how
@@ -310,7 +377,7 @@ export function validateLocal(local) {
         `${key} is an enforcement key; it may only be set in ${GATE_FILE}`,
       )
     }
-    if (!['maxParallel', 'batchSize', 'caveman', 'agents', 'harnesses', 'watch', 'ci'].includes(key)) {
+    if (!['maxParallel', 'batchSize', 'caveman', 'agents', 'harnesses', 'watch', 'ci', 'cost'].includes(key)) {
       throw new ConfigError(`unknown key in ${LOCAL_FILE}: ${key}`)
     }
   }
@@ -343,6 +410,7 @@ export function validateLocal(local) {
   if (local.harnesses !== undefined) validateHarnesses(local.harnesses, LOCAL_FILE)
   if (local.watch !== undefined) validateWatch(local.watch, LOCAL_FILE)
   if (local.ci !== undefined) validateCi(local.ci, LOCAL_FILE)
+  if (local.cost !== undefined) validateCost(local.cost, LOCAL_FILE)
   return local
 }
 
@@ -382,6 +450,7 @@ export function validateGate(gate) {
   if (gate.harnesses !== undefined) validateHarnesses(gate.harnesses, GATE_FILE)
   if (gate.watch !== undefined) validateWatch(gate.watch, GATE_FILE)
   if (gate.ci !== undefined) validateCi(gate.ci, GATE_FILE)
+  if (gate.cost !== undefined) validateCost(gate.cost, GATE_FILE)
   // Every entry in ENFORCEMENT_KEYS has a validator. If a future key joins that list without
   // one, refusing is the right direction — waving an unchecked enforcement key through is the
   // one outcome this must never have — but it is refused as a ConfigError, not as a raw
@@ -468,6 +537,14 @@ export async function loadConfig(root) {
       harnesses,
       // Literal defaults rather than an import of scripts/watch.mjs, so config.mjs does not depend on the watchdog.
       ci: { push: 'ask', waitMinutes: 60, ...gate.ci, ...local?.ci },
+      // Merged per model, not per block: a local price for one model must not erase the
+      // committed prices of the others.
+      cost: {
+        currency: local?.cost?.currency ?? gate.cost?.currency ?? 'USD',
+        budget: local?.cost?.budget ?? gate.cost?.budget ?? null,
+        prices: { ...gate.cost?.prices, ...local?.cost?.prices },
+        contextWindows: { ...gate.cost?.contextWindows, ...local?.cost?.contextWindows },
+      },
       watch: { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, learn: true, spinFailures: 5, ...gate.watch, ...local?.watch },
     },
     sources,
@@ -534,7 +611,9 @@ export function validateKey(dotted, value) {
   // validateHarnesses a one-key harness object, reusing its per-field rules rather than
   // duplicating them here. tierModels is deliberately absent: it is an object, not a scalar
   // `config set` can parse from an argv string.
-  const harnessMatch = /^harnesses\.([a-z]+)\.(sandbox|network|timeoutMinutes)$/.exec(dotted)
+  const costMatch = /^cost\.(currency|budget)$/.exec(dotted)
+  if (costMatch) { validateCost({ [costMatch[1]]: value }, LOCAL_FILE); return value }
+  const harnessMatch = /^harnesses\.([a-z]+)\.(sandbox|network|timeoutMinutes|limitWaitMinutes)$/.exec(dotted)
   if (harnessMatch) {
     const [, name, field] = harnessMatch
     validateHarnesses({ [name]: { [field]: value } }, LOCAL_FILE)

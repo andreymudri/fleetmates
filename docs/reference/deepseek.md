@@ -64,7 +64,33 @@ dashboard instead.
 ## Limits
 
 - Expect runs to take roughly 2.5 times longer.
-- `node scripts/cli.mjs usage` reports DeepSeek token counts correctly, but any US$ figure it or
-  Claude Code shows uses Claude prices.
+- `node scripts/cli.mjs usage` reports DeepSeek token counts correctly. Claude Code's own cost
+  figure uses Claude prices; to have `usage` price the run in DeepSeek's currency, set
+  `cost.prices` (see below).
 - The code leaves your machine for DeepSeek's servers. Check that this is allowed for the
   repository before you run a fleet on it.
+
+## Pricing a DeepSeek run
+
+`usage` prices each subagent from the `cost` block in `fleetmates.local.json` (or the tracked
+manifest). With every request going to DeepSeek, one `*` entry covers every model name the report
+shows. The numbers below are placeholders: copy the current prices per million tokens from
+DeepSeek's pricing page, because they change.
+
+    {
+      "cost": {
+        "currency": "CNY",
+        "budget": 20,
+        "prices": { "*": { "input": 2, "output": 8, "cacheRead": 0.5, "cacheWrite": 2 } },
+        "contextWindows": { "*": 128000 }
+      }
+    }
+
+DeepSeek prices input by cache hit and cache miss. Put the hit price in `cacheRead` and the miss
+price in `input`. How the endpoint reports cache creation was not measured, so `cacheWrite` at the
+miss price is a starting assumption. The result is an estimate from tokens: compare it with the
+DeepSeek dashboard before relying on it.
+
+When the DeepSeek balance runs out mid-run, the provider refuses with an error that waiting does
+not fix. A headless teammate (`--harness`) is then orphaned with that error as its reason;
+`limitWaitMinutes` only waits out errors the harness marks as retriable.
