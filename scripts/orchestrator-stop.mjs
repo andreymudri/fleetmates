@@ -42,7 +42,7 @@ if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === imp
   let input
   try { const body = readFileSync(0, 'utf8'); if (Buffer.byteLength(body) <= 1024 * 1024) input = JSON.parse(body) } catch { /* fail open */ }
   if (input && typeof input.session_id === 'string') {
-    try { await appendEvent(stopReceiptPath(), { kind: 'hook-fired', hook: 'Stop', at: Date.now(), fingerprint: fingerprint(input.session_id) }) } catch { /* optional observation */ }
+    try { await appendEvent(stopReceiptPath(), { kind: 'hook-fired', hook: 'Stop', at: Date.now(), fingerprint: fingerprint(input.session_id) }, { rotate: true }) } catch { /* optional observation */ }
   }
   process.exitCode = await handleOrchestratorStop(input, { err: console.error })
 }

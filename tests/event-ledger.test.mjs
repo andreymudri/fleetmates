@@ -5,7 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { appendEvent, readEvents, ledgerSummary, ledgerPath, fingerprint, MAX_LEDGER_BYTES, MAX_STALL_BLOCKS, stallDecision, projectEvent } from '../scripts/event-ledger.mjs'
+import { appendEvent, readEvents, rotatedPath, ledgerSummary, ledgerPath, fingerprint, MAX_LEDGER_BYTES, MAX_STALL_BLOCKS, stallDecision, projectEvent } from '../scripts/event-ledger.mjs'
 import { handleContextHook, resolveContext, receiptPath, HOOK_NAMES } from '../scripts/context-hook.mjs'
 import { hookDoctor } from '../scripts/hook-doctor.mjs'
 import { writeState, writeLocation } from '../scripts/state.mjs'
@@ -240,3 +240,25 @@ test('all lifecycle callbacks are synchronously wired to the shipped context han
   }
   assert.equal(config.hooks.PostToolUse[0].matcher, 'Bash')
 })
+
+test('a full hook receipt file is set aside, the receipt is written, and doctor still reads the earlier ones', async () => fixture(async root => {
+  const env = { CLAUDE_CONFIG_DIR: root }
+  const file = receiptPath(env)
+  const now = 5_000_000
+  // The earlier line is the shorter one, so the new receipt never fits in what is left.
+  const earlier = JSON.stringify(projectEvent({ kind: 'hook-fired', hook: 'PostToolUse', at: now - 1000, fingerprint: fingerprint('s') })) + '\n'
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, earlier.repeat(Math.floor(MAX_LEDGER_BYTES / earlier.length)))
+  assert.equal(await handleContextHook({ hook_event_name: 'SessionStart', session_id: 's' }, { env, now: () => now }), 0)
+  assert.deepEqual((await readEvents(file)).map(e => e.hook), ['SessionStart'])
+  assert.ok((await readEvents(rotatedPath(file))).every(e => e.hook === 'PostToolUse'))
+  const report = await hookDoctor({ env, now })
+  const state = Object.fromEntries(report.hooks.map(h => [h.hook, h.state]))
+  assert.equal(state.PostToolUse, 'observed')
+  assert.equal(state.SessionStart, 'observed')
+  // A run ledger keeps its bound: it is never rotated.
+  const ledger = ledgerPath(root, 'r1', 'T1')
+  await mkdir(path.dirname(ledger), { recursive: true })
+  await writeFile(ledger, 'x'.repeat(MAX_LEDGER_BYTES))
+  await assert.rejects(appendEvent(ledger, event('task-started')), /unsafe or full/)
+}))
