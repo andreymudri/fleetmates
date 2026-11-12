@@ -59,7 +59,9 @@ On Claude Code older than 2.1.275, add the marketplace first:
     /plugin marketplace add andreymudri/fleetmates
     /plugin install fleetmates
 
-The marketplace installs the package published on npm as `fleetmates`, not a checkout. To develop
+The marketplace installs the released plugin files from this repository's `directory` branch, which
+each release refreshes with exactly what the npm package `fleetmates` ships. It does not install a
+checkout of `master`, and it does not need npm. To develop
 against a local checkout instead, load the directory directly — skill edits then take effect on
 the next session without a publish:
 

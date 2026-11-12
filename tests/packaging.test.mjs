@@ -14,7 +14,14 @@ test('marketplace manifest names the same plugin as plugin.json', async () => {
   const entry = marketplace.plugins.find((p) => p.name === plugin.name)
   assert.ok(entry, `marketplace.json does not list ${plugin.name}`)
   assert.equal(marketplace.name, 'fleetmates')
-  assert.deepEqual(entry.source, { source: 'npm', package: 'fleetmates' })
+  assert.deepEqual(entry.source, { source: 'url', url: 'https://github.com/andreymudri/fleetmates.git', ref: 'directory' })
+})
+
+test('the marketplace source ref is the branch the release workflow refreshes', async () => {
+  const marketplace = await readJson('../.claude-plugin/marketplace.json')
+  const { ref } = marketplace.plugins[0].source
+  const release = await readFile(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8')
+  assert.ok(release.includes(`:refs/heads/${ref}"`), `release.yml does not push the ${ref} branch`)
 })
 
 test('third-party license text is present and names the upstream author', async () => {
