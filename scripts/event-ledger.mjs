@@ -1,7 +1,7 @@
 // Observation only. Git-derived enforcement remains the authority for completion.
 // No command, output, title or handoff prose is retained or rendered to the lead.
 import { constants } from 'node:fs'
-import { mkdir, open, realpath } from 'node:fs/promises'
+import { lstat, mkdir, open, realpath, rename } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 
@@ -64,15 +64,29 @@ async function safeParent(file, create = false) {
   if (await realpath(parent) !== await expected(parent)) throw new Error('ledger parent is a link')
 }
 
-export async function appendEvent(file, value) {
+// Hook receipts are written for as long as the plugin is installed, so their file fills. A full
+// receipt file is set aside as one previous generation and a new one is started; a run ledger is
+// never rotated, because its bound is what stops a teammate from growing it.
+export const rotatedPath = (file) => `${file}.1`
+
+export async function appendEvent(file, value, { rotate = false } = {}) {
   const line = JSON.stringify(projectEvent(value)) + '\n'
   await safeParent(file, true)
-  const h = await open(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
-  try {
-    const stat = await h.stat()
-    if (!stat.isFile() || stat.size + Buffer.byteLength(line) > MAX_LEDGER_BYTES || await realpath(file) !== await expected(path.resolve(file))) throw new Error('ledger is unsafe or full')
-    await h.write(line)
-  } finally { await h.close() }
+  for (let attempt = 0; ; attempt += 1) {
+    let full
+    const h = await open(file, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0), 0o600)
+    try {
+      const stat = await h.stat()
+      if (!stat.isFile() || await realpath(file) !== await expected(path.resolve(file))) throw new Error('ledger is unsafe or full')
+      if (stat.size + Buffer.byteLength(line) <= MAX_LEDGER_BYTES) { await h.write(line); return }
+      if (!rotate || attempt > 0) throw new Error('ledger is unsafe or full')
+      full = stat.ino
+    } finally { await h.close() }
+    // Another hook may have rotated between the check and here: move the file only if it is
+    // still the full one, so a fresh file never replaces the previous generation.
+    const current = await lstat(file).catch(() => null)
+    if (current?.ino === full) await rename(file, rotatedPath(file))
+  }
 }
 
 export async function readEvents(file) {

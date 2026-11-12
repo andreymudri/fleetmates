@@ -65,7 +65,7 @@ export async function handleContextHook(input, { env = process.env, now = Date.n
   const hook = input?.hook_event_name
   if (!HOOK_NAMES.includes(hook)) return 0
   // A receipt is evidence that this handler fired, not a promise that other hooks ran.
-  try { await appendEvent(receiptPath(env), { kind: 'hook-fired', hook, at: now(), fingerprint: fingerprint(input.session_id ?? '') }) } catch { /* optional observation */ }
+  try { await appendEvent(receiptPath(env), { kind: 'hook-fired', hook, at: now(), fingerprint: fingerprint(input.session_id ?? '') }, { rotate: true }) } catch { /* optional observation */ }
   if (typeof input.cwd !== 'string' || !input.cwd) return 0
   const context = await resolve(input.cwd)
   if (!context) return 0

@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.9.2
+
+### Fixed
+
+- Installing or updating the plugin no longer fails with `EALLOWREMOTE` on npm 12, whose default
+  refuses a package fetched by tarball URL. The marketplace now installs from the `directory`
+  branch of this repository over git instead of from npm. That branch holds the same files the npm
+  package ships and is refreshed by each release. Measured on Claude Code 2.1.322 and Codex CLI
+  0.167.1; Codex does not accept the `github` source type, so the entry uses `url` with a `ref`.
+- Hook receipts no longer stop once `hook-receipts.jsonl` reaches 1 MiB. The full file was
+  refused on every write and the error was dropped, so `doctor --hooks` reported working hooks as
+  unverified a day later. A full receipt file is now set aside as `hook-receipts.jsonl.1`, a new
+  one is started, and `doctor --hooks` reads both. Run ledgers keep their bound and are not
+  rotated.
+
 ## v2.9.1
 
 ### Changed
