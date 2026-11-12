@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
-import { readEvents } from './event-ledger.mjs'
+import { readEvents, rotatedPath } from './event-ledger.mjs'
 import { HOOK_NAMES, receiptPath, stopReceiptPath } from './context-hook.mjs'
 
 // A failing Bash call is not something every session makes, so its receipt is reported when seen
@@ -10,8 +10,11 @@ export const OPTIONAL_HOOKS = new Set(['PostToolUseFailure'])
 
 export async function hookDoctor({ env = process.env, now = Date.now(), maxAgeMs = 24 * 60 * 60 * 1000, sessionId, includeStop = false } = {}) {
   const { fingerprint } = await import('./event-ledger.mjs')
-  const events = await readEvents(receiptPath(env))
-  if (includeStop) events.push(...await readEvents(stopReceiptPath(env)))
+  // A full receipt file is set aside as one previous generation; read it first so a hook that
+  // fired just before the rotation still counts.
+  const read = async (file) => [...await readEvents(rotatedPath(file)), ...await readEvents(file)]
+  const events = await read(receiptPath(env))
+  if (includeStop) events.push(...await read(stopReceiptPath(env)))
   const session = sessionId === undefined ? undefined : fingerprint(sessionId)
   const hooks = [...HOOK_NAMES, ...(includeStop ? ['Stop'] : [])].map(hook => {
     const observed = events.filter(e => e.kind === 'hook-fired' && e.hook === hook && e.at <= now && now - e.at <= maxAgeMs && (session === undefined || e.fingerprint === session))
