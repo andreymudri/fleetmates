@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { discover, git } from '../scripts/workflow-lifecycle.mjs'
-import { retainExecutionArtifact, readExecutionArtifact, pruneExecutionArtifacts, RETENTION_LIMITS } from '../scripts/execution-artifacts.mjs'
+import { retainExecutionArtifact, readExecutionArtifact, pruneExecutionArtifacts, RETENTION_LIMITS, removeLockDirectory } from '../scripts/execution-artifacts.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const retention = { maxArtifactBytes: 64, maxRunBytes: 128, maxAgeMs: 1000 }
@@ -718,4 +718,28 @@ test('a lock directory swapped for a new one between the holder read and the rec
   assert.equal((await lstat(lock)).ino, fresh)
   assert.equal(await readFile(path.join(lock, 'pid'), 'utf8'), `${dead}\n`)
   assert.deepEqual(await readdir(lock), ['pid'])
+})
+
+test('removing a released lock directory clears an entry that landed in it during the removal', async t => {
+  const base = await mkdtemp(path.join(tmpdir(), 'lock-remove-'))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const moved = path.join(base, '.lock.1.stale')
+  await mkdir(moved)
+  let calls = 0
+  // What a late reclaim token does to the real removal: an entry appears after the listing.
+  const racing = async (target, options) => {
+    if (++calls > 1) return rm(target, options)
+    await writeFile(path.join(target, 'late.token'), '1\n')
+    throw Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY' })
+  }
+  await removeLockDirectory(moved, racing)
+  assert.equal(calls, 2)
+  assert.deepEqual(await readdir(base), [])
+  let attempts = 0
+  const stuck = async () => { attempts++; throw Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY' }) }
+  await assert.rejects(removeLockDirectory(moved, stuck), { code: 'ENOTEMPTY' })
+  assert.equal(attempts, 5)
+  let denied = 0
+  await assert.rejects(removeLockDirectory(moved, async () => { denied++; throw Object.assign(new Error('denied'), { code: 'EACCES' }) }), { code: 'EACCES' })
+  assert.equal(denied, 1)
 })
