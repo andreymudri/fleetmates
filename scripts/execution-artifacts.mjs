@@ -178,6 +178,17 @@ async function lockEntries(lock) {
   for await (const entry of await opendir(lock)) if (++entries > MAX_LOCK_ENTRIES) throw oversizedLock(lock)
   return entries
 }
+// A lock directory is renamed aside and then removed. A waiter that resolved the lock path just
+// before the rename can still create its reclaim token inside the renamed directory, after the
+// removal listed it: the final rmdir then fails with ENOTEMPTY. No new entry can start once the
+// name is gone, so removing again clears it.
+export async function removeLockDirectory(moved, remove = rm) {
+  for (let attempt = 0; ; attempt++) {
+    try { await remove(moved, { recursive: true, force: true }); return }
+    catch (error) { if (error.code !== 'ENOTEMPTY' || attempt >= 4) throw error }
+    await sleep(5 * (attempt + 1))
+  }
+}
 async function reclaimLock(dir, lock, holder) {
   let name = `reclaim.${holder.pid ?? 'none'}`
   try {
@@ -197,7 +208,7 @@ async function reclaimLock(dir, lock, holder) {
       }
       const moved = path.join(dir, lockEntryName('stale'))
       await rename(lock, moved)
-      await rm(moved, { recursive: true, force: true })
+      await removeLockDirectory(moved)
       return true
     }
     return false
@@ -220,7 +231,7 @@ export async function withStorageLock(dir, busy, action) {
   finally {
     const moved = path.join(dir, lockEntryName('stale'))
     await rename(lock, moved)
-    await rm(moved, { recursive: true, force: true })
+    await removeLockDirectory(moved)
   }
 }
 // Called while holding the storage lock, so no live writer owns a temporary file; the age

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Releasing or reclaiming a storage lock no longer fails with `ENOTEMPTY`, leaving a `.stale`
+  lock entry behind, when a waiting process creates its reclaim token inside the lock directory
+  while that directory is being removed. The removal is repeated. Seen once in 480 contended
+  acquisitions on Linux.
+
 ## v2.9.2
 
 ### Fixed
