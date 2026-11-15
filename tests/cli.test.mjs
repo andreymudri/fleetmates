@@ -229,6 +229,14 @@ The gate answers PASS or FAIL from git alone.
 
 - Caching — the destination is the verdict, not latency
 
+## Statement
+
+Make the gate answer from git.
+
+## Acceptance
+
+- The verdict needs no operator
+
 ### Task 1: A
 
 **Files:**
@@ -334,7 +342,7 @@ test('init-run refuses an Out of Scope entry with no reason, quoting the exact r
     const planPath = path.join(root, 'scope-plan.md')
     await writeFile(
       planPath,
-      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Caching\n\n${PLAN}`,
+      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Caching\n\n## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n${PLAN}`,
       'utf8',
     )
     git(root, ['add', '.'])
@@ -350,6 +358,30 @@ test('init-run refuses an Out of Scope entry with no reason, quoting the exact r
     )
     await assert.rejects(readPlan(root, 'r1'))
   })
+})
+
+test('init-run refuses an Out of Scope section without the Statement or the Acceptance it is judged against', async () => {
+  const bounded = '## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Caching — its own spec\n\n'
+  for (const [name, head, refusal] of [
+    ['no-statement', '## Acceptance\n\n- It is done\n\n',
+      'plan defect: this plan has an Out of Scope section but no Statement.\n'
+      + 'Gates and reviewers judge the work against the plan, so a boundary can only be\n'
+      + 'checked against the request. Add `## Statement` with the request as it was made.'],
+    ['no-acceptance', '## Statement\n\nDo the thing.\n\n',
+      'plan defect: this plan has an Out of Scope section but no Acceptance entry.\n'
+      + 'Add `## Acceptance` with what must be true of the finished work, taken from\n'
+      + 'the statement and not from the tasks.'],
+  ]) {
+    await withRepo(async ({ root, io, lines }) => {
+      const planPath = path.join(root, `${name}-plan.md`)
+      await writeFile(planPath, `${head}${bounded}${PLAN}`, 'utf8')
+      git(root, ['add', '.'])
+      git(root, ['commit', '--quiet', '-m', `add ${name} plan`])
+      assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 2)
+      assert.equal(lines.join('\n'), refusal)
+      await assert.rejects(readPlan(root, 'r1'))
+    })
+  }
 })
 
 test('init-run refuses an Out of Scope section with an empty Destination', async () => {
@@ -14315,7 +14347,7 @@ test('init-run neutralises control bytes in a quoted Out of Scope entry', async 
     const planPath = path.join(root, 'forged-scope-plan.md')
     await writeFile(
       planPath,
-      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Deploy \x1b[2A\x1b[0Jrollout\n\n${PLAN}`,
+      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Deploy \x1b[2A\x1b[0Jrollout\n\n## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n${PLAN}`,
       'utf8',
     )
     git(root, ['add', '.'])

@@ -1057,6 +1057,17 @@ function formatPlanSectionError(err) {
       + 'Out of scope means beyond the destination, so without one there is\n'
       + 'nothing to judge an entry against.'
   }
+  // Document-level, like the missing Destination: no bullet to quote, and no plan text printed.
+  if (err.reason === 'missing-statement') {
+    return 'plan defect: this plan has an Out of Scope section but no Statement.\n'
+      + 'Gates and reviewers judge the work against the plan, so a boundary can only be\n'
+      + 'checked against the request. Add `## Statement` with the request as it was made.'
+  }
+  if (err.reason === 'missing-acceptance') {
+    return 'plan defect: this plan has an Out of Scope section but no Acceptance entry.\n'
+      + 'Add `## Acceptance` with what must be true of the finished work, taken from\n'
+      + 'the statement and not from the tasks.'
+  }
   if (err.reason === 'missing-reason') {
     return `plan defect: ${err.message}.\n`
       + 'An entry without a reason is not a scope boundary — it is a word.\n'
