@@ -109,6 +109,6 @@ this because a check "obviously" passes is the same defect as skipping the check
 | A review in detail: reviewer tier and effort, findings files and stamps, `collect-reviews` refusals and exit codes, the `claims` lens keys, results keyed by phase for `finish` | `reference/review-results.md` |
 | A phase gate failed: `fix`, `retry`, `escalate`, the round budget, a `--no-fleet` gate | `reference/on-fail.md` |
 | The `merge` check: the preview, `preview.link`, a conflict | `reference/merge-preview.md` |
-| What `fileset` and `ownership` cover, protected paths, the test inventory | `reference/enforcement.md` |
+| What `fileset` and `ownership` cover, protected paths, the test inventory, static analysis as a `command` check | `reference/enforcement.md` |
 | `platformSim`, `flaky`, the quarantine file, the `portability` lens | `reference/platform-and-timing.md` |
 | The orchestrator is not Claude Code | `reference/other-harnesses.md` |

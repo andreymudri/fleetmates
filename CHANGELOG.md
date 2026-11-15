@@ -4,9 +4,29 @@
 
 ### Added
 
+- A plan can state the request it was written from. `## Statement` holds the request and
+  `## Acceptance` what must be true of the finished work. `plan-check --plan <path>` prints the
+  prompt for one reviewer that reads the plan against them and reports what the plan leaves out.
+  The reviewer may read the code to see whether something an Out of Scope entry excludes is
+  needed.
+  Gates and reviewers judge the work against the plan, so a plan that excluded something the
+  request needed used to pass every gate. The run review now also judges the integrated diff
+  against the Acceptance entries.
+- `review-depth` measures a branch's diff and suggests how much review it needs: the suite only,
+  two lenses, or every lens. It is advisory: it exits 0 whatever it suggests and no gate reads it.
+- `cost.stopAtBudget` (off by default). When on, `workflow` and `dispatch` start nothing once the
+  priced spend of the current session's subagents reaches `cost.budget`. Teammates already running are not stopped.
+- The README and the `phase-gate` skill show static analysis tools as `command` checks.
 - `doctor --hooks --stop` prints, under `stopGuard`, the one case in which the Stop guard blocks
   and every case in which it lets the stop through. The installation reference lists the same
   cases, and the README says the guard fails open.
+
+### Changed
+
+- `init-run` refuses a plan that has `## Out of Scope` without a `## Statement` and at least one
+  `## Acceptance` entry, as it already refused one without a `## Destination`. Plans without
+  `## Out of Scope` are not affected. An existing plan that declares Out of Scope needs the two
+  sections added before a new run can be created from it.
 
 ### Fixed
 

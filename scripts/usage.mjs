@@ -126,6 +126,24 @@ export function annotateUsage(report, cost) {
   return out
 }
 
+// Whether an annotated report has reached its budget: the stop `cost.stopAtBudget` acts on, or
+// null. Only priced spend is compared, so with unpriced agents the total is a lower bound and the
+// stop comes late, never early. A report with no cost block (nothing priced) never stops.
+export function budgetStop(report) {
+  const cost = report?.cost
+  if (!cost || !(cost.budget > 0) || !(cost.total >= cost.budget)) return null
+  return { total: cost.total, budget: cost.budget, currency: cost.currency, unpriced: cost.unpriced ?? 0 }
+}
+
+export function budgetStopLines(stop) {
+  const lines = [`budget reached: ${money(stop.total)} of ${money(stop.budget)} ${stop.currency} spent by this session's subagents`]
+  if (stop.unpriced > 0) {
+    lines.push(`${stop.unpriced} agent${stop.unpriced === 1 ? '' : 's'} had no price and ${stop.unpriced === 1 ? 'is' : 'are'} not counted, so the total is a lower bound`)
+  }
+  lines.push('nothing was started (cost.stopAtBudget is on); teammates already running are not affected')
+  return lines
+}
+
 // The budget lines under the table. A warning, never an exit code: the budget does not stop work.
 export function budgetLines(summary) {
   if (!summary || !(summary.budget > 0)) return []

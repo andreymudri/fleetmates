@@ -229,6 +229,14 @@ The gate answers PASS or FAIL from git alone.
 
 - Caching — the destination is the verdict, not latency
 
+## Statement
+
+Make the gate answer from git.
+
+## Acceptance
+
+- The verdict needs no operator
+
 ### Task 1: A
 
 **Files:**
@@ -334,7 +342,7 @@ test('init-run refuses an Out of Scope entry with no reason, quoting the exact r
     const planPath = path.join(root, 'scope-plan.md')
     await writeFile(
       planPath,
-      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Caching\n\n${PLAN}`,
+      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Caching\n\n## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n${PLAN}`,
       'utf8',
     )
     git(root, ['add', '.'])
@@ -350,6 +358,30 @@ test('init-run refuses an Out of Scope entry with no reason, quoting the exact r
     )
     await assert.rejects(readPlan(root, 'r1'))
   })
+})
+
+test('init-run refuses an Out of Scope section without the Statement or the Acceptance it is judged against', async () => {
+  const bounded = '## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Caching — its own spec\n\n'
+  for (const [name, head, refusal] of [
+    ['no-statement', '## Acceptance\n\n- It is done\n\n',
+      'plan defect: this plan has an Out of Scope section but no Statement.\n'
+      + 'Gates and reviewers judge the work against the plan, so a boundary can only be\n'
+      + 'checked against the request. Add `## Statement` with the request as it was made.'],
+    ['no-acceptance', '## Statement\n\nDo the thing.\n\n',
+      'plan defect: this plan has an Out of Scope section but no Acceptance entry.\n'
+      + 'Add `## Acceptance` with what must be true of the finished work, taken from\n'
+      + 'the statement and not from the tasks.'],
+  ]) {
+    await withRepo(async ({ root, io, lines }) => {
+      const planPath = path.join(root, `${name}-plan.md`)
+      await writeFile(planPath, `${head}${bounded}${PLAN}`, 'utf8')
+      git(root, ['add', '.'])
+      git(root, ['commit', '--quiet', '-m', `add ${name} plan`])
+      assert.equal(await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io), 2)
+      assert.equal(lines.join('\n'), refusal)
+      await assert.rejects(readPlan(root, 'r1'))
+    })
+  }
 })
 
 test('init-run refuses an Out of Scope section with an empty Destination', async () => {
@@ -2267,7 +2299,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 168, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 172, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2467,10 +2499,17 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **188 lines: 168 in `cli.mjs`, 7 in
+// can no longer drift away from the code unnoticed. It came to **192 lines: 172 in `cli.mjs`, 7 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **5 sites in `cli.mjs`**, `merge-guard`: the no-branch refusal (the
+// The most recent move was **4 sites in `cli.mjs`**: `plan-check`'s cannot-read refusal (the fs
+// error, which quotes the `--plan` path) and the prompt document it prints (`printableBlock`; the
+// plan path is argv), `review-depth`'s refusal (git's error text and the `--base` value), and the
+// budget stop's not-checked notice (the transcript store path, which carries a session directory
+// name). Driven by `tests/plan-check.test.mjs`, `tests/review-depth.test.mjs` and
+// `tests/budget-stop.test.mjs`; not row-driven here.
+//
+// The move before that was **5 sites in `cli.mjs`**, `merge-guard`: the no-branch refusal (the
 // `--branch` or `--base` value and the root), the invalid-manifest refusal (the `--base` value),
 // the could-not-diff line (both branch names and git's error text), the refused line (the branch
 // and every changed file it names) and the allowed line (the branch). Driven by
@@ -14315,7 +14354,7 @@ test('init-run neutralises control bytes in a quoted Out of Scope entry', async 
     const planPath = path.join(root, 'forged-scope-plan.md')
     await writeFile(
       planPath,
-      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Deploy \x1b[2A\x1b[0Jrollout\n\n${PLAN}`,
+      `## Destination\n\nSomething landable.\n\n## Out of Scope\n\n- Deploy \x1b[2A\x1b[0Jrollout\n\n## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n${PLAN}`,
       'utf8',
     )
     git(root, ['add', '.'])

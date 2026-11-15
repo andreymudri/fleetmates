@@ -54,9 +54,41 @@ The gate can answer "is this run landable" without an operator reading any prose
 All three are optional. `## Out of Scope` requires a `## Destination` with prose under it in
 the same document — an empty `## Destination` heading is treated exactly like an absent one,
 because "out of scope" means beyond the destination, and a heading with nothing under it leaves
-that unjudgeable. This is the format's rule, defined in `scripts/plan-sections.mjs`; it is
-refused at the moment a run is created once `init-run` wires that module in, which has not
-happened yet — see below.
+that unjudgeable. This is the format's rule, defined in `scripts/plan-sections.mjs`, and
+`init-run` refuses a plan that breaks it — see below.
+
+### Statement and Acceptance
+
+Two more header sections record what was asked, so the plan can be checked against it:
+
+```markdown
+## Statement
+
+Make the usage report show cost per agent, and warn when a run passes its budget.
+
+## Acceptance
+
+- The report prints a cost for every agent whose model has a price
+- A run past its budget prints a warning and still exits 0
+```
+
+`## Statement` is the request as it was made, in prose, copied rather than summarised.
+`## Acceptance` lists what must be true of the finished work, taken from the statement and not
+from the tasks: a criterion derived from a task only restates the plan.
+
+**A plan with `## Out of Scope` must carry both**: a `## Statement` with prose and an
+`## Acceptance` with at least one entry. Gates and reviewers judge the work against the plan, so
+a plan that excludes something the request needs passes every one of them; the boundary can only
+be judged against the request. A plan without `## Out of Scope` may omit both.
+
+Before execution, have one fresh reviewer read the plan against its statement:
+
+    node "<fleetmates root>/scripts/cli.mjs" plan-check --plan docs/plans/<file>.md --root <project root>
+
+It prints one `tm-reviewer` prompt with the lens `statement` and does nothing else. Dispatch that
+reviewer and resolve its `high` findings in the plan before the first task starts. The reviewer
+is fresh on purpose: the session that wrote the plan reads its own Out of Scope entry as the
+decision it remembers making.
 
 **The fog-or-task test**, and the rule the whole feature rests on — it turns on
 dispatchability, not sharpness:
@@ -78,15 +110,12 @@ sharpness is not the test, dispatchability is.
   at the end, so the question can carry the context that makes it worth reading. A question mark
   is what keeps fog from becoming a dumping ground for work nobody wanted to size.
 
-**Nothing enforced reads these sections yet.** `scripts/plan-sections.mjs` defines the two entry
-rules and the destination dependency above, and checks shape — a separator is present, a `?` is
-present, a destination has prose — not truth. But no caller in `scripts/` imports
-`parsePlanSections`: as of this writing `init-run` does not parse these sections, no check
-consults them, no verdict depends on them, and no teammate is handed them. A plan can carry a
-bare-noun Out of Scope entry or an unanswered fog entry today and nothing will refuse it. The
-wiring that makes `init-run` enforce these rules at the moment a run is created is its own task;
-until that lands, treat this section as the format's rules, not as something the CLI checks. Do
-not write a sentence here or in a plan that implies otherwise.
+**What enforces these rules.** `init-run` parses the header sections from the plan in the working
+tree and refuses the run, with exit 2, on a malformed entry or a missing Destination, Statement
+or Acceptance. `rebuild-state` reads the plan at the anchor and, on the same defects, rebuilds
+the section fields as empty instead of refusing. The rules check shape — a separator is present,
+a `?` is present, a section has prose or an entry — not truth: whether a reason is a good one, or
+an acceptance entry really follows from the statement, is what `plan-check` and review are for.
 
 **An `## Out of Scope` entry does not answer a reviewer's finding.** A finding relocated there
 is still a finding, and moving it changes nothing about whether it is real. The mechanical rules
@@ -215,7 +244,8 @@ Before handing the plan off, check:
 - **Placeholder scan** — no "TBD", "similar to Task N", or other stand-ins remain.
 - **Type consistency** — the same field, function, or shape is described identically wherever
   it appears across tasks.
-- **Statement check** — re-read the task statement the plan was written from: the Out of Scope
-  section excludes nothing the statement requires, and every task a `**Depends:**` line names
-  exists in the plan. Nothing enforces this check: gates and reviewers judge the work against the
-  plan, so a plan that leaves out what the statement requires passes every gate.
+- **Statement check** — run `plan-check` and give the prompt it prints to one `tm-reviewer`, then
+  fix its high findings in the plan (see "Statement and Acceptance" above). Nothing else reads the
+  plan against its statement: gates and reviewers judge the work against the plan, so a plan that
+  leaves out what the statement requires passes every gate. Do not do this check yourself in the
+  reviewer's place: you are the reader who wrote the plan.

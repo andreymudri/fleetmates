@@ -19,6 +19,16 @@ function lineOf(markdown, needle) {
 
 const FULL = `# A plan
 
+## Statement
+
+Make the gate answer from git,
+without an operator.
+
+## Acceptance
+
+- The verdict needs no operator
+- A second run gives the same verdict
+
 ## Destination
 
 The gate answers PASS or FAIL from git alone,
@@ -80,7 +90,7 @@ test('no section leaks a task heading or a task file bullet into itself', () => 
 
 test('a document with none of the three sections parses to the empty shape', () => {
   const sections = parsePlanSections('# A plan\n\n### Task 1: something\n')
-  assert.deepEqual(sections, { destination: null, notYetSpecified: [], outOfScope: [] })
+  assert.deepEqual(sections, { destination: null, notYetSpecified: [], outOfScope: [], statement: null, acceptance: [] })
 })
 
 test('parsePlanSections tolerates a nullish document', () => {
@@ -88,11 +98,13 @@ test('parsePlanSections tolerates a nullish document', () => {
     destination: null,
     notYetSpecified: [],
     outOfScope: [],
+    statement: null,
+    acceptance: [],
   })
 })
 
 test('Destination alone parses, with the other two empty', () => {
-  const md = '# A plan\n\n## Destination\n\nSomewhere specific.\n'
+  const md = '# A plan\n\n## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n## Destination\n\nSomewhere specific.\n'
   const sections = parsePlanSections(md)
   assert.equal(sections.destination, 'Somewhere specific.')
   assert.deepEqual(sections.notYetSpecified, [])
@@ -127,7 +139,7 @@ test('Out of Scope alone is refused, because it has no Destination to be beyond'
 })
 
 test('Out of Scope with a Destination is accepted', () => {
-  const md = '# A plan\n\n## Destination\n\nSomewhere.\n\n## Out of Scope\n\n- Caching — its own spec\n'
+  const md = '# A plan\n\n## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n## Destination\n\nSomewhere.\n\n## Out of Scope\n\n- Caching — its own spec\n'
   assert.deepEqual(
     parsePlanSections(md).outOfScope.map((e) => e.text),
     ['Caching — its own spec'],
@@ -143,7 +155,7 @@ const SEPARATORS = [
 
 for (const [name, entry] of SEPARATORS) {
   test(`a reason clause introduced by ${name} is accepted`, () => {
-    const md = `## Destination\n\nSomewhere.\n\n## Out of Scope\n\n- ${entry}\n`
+    const md = `## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n## Destination\n\nSomewhere.\n\n## Out of Scope\n\n- ${entry}\n`
     assert.ok(md.includes(entry), 'fixture must carry the entry under test')
     assert.deepEqual(
       parsePlanSections(md).outOfScope.map((e) => e.text),
@@ -153,13 +165,21 @@ for (const [name, entry] of SEPARATORS) {
 }
 
 test('a separator with nothing after it is not a reason clause', () => {
-  const md = '## Destination\n\nSomewhere.\n\n## Out of Scope\n\n- Caching —\n'
+  const md = '## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n## Destination\n\nSomewhere.\n\n## Out of Scope\n\n- Caching —\n'
   assert.ok(md.includes('- Caching —'), 'fixture must carry the malformed entry')
   assert.throws(() => parsePlanSections(md), PlanSectionError)
 })
 
 test('a bare noun in Out of Scope is refused, naming its line and quoting it', () => {
   const md = `# A plan
+
+## Statement
+
+Do the thing.
+
+## Acceptance
+
+- The thing is done
 
 ## Destination
 
@@ -322,7 +342,7 @@ test('a `+` bulleted entry still joins its wrapped continuation line', () => {
 // An entry-level refusal must still fire when the section is written with `*` bullets — not
 // only for `-`, which is the one shape a marker-narrow implementation happens to see.
 test('a `*` bulleted Out of Scope entry with no reason is still refused', () => {
-  const md = '## Destination\n\nSomething landable.\n\n## Out of Scope\n\n* Caching\n'
+  const md = '## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n## Destination\n\nSomething landable.\n\n## Out of Scope\n\n* Caching\n'
   assert.throws(
     () => parsePlanSections(md),
     (err) => err instanceof PlanSectionError && err.reason === 'missing-reason' && err.entry === 'Caching',
@@ -348,7 +368,7 @@ test('a heading with regex metacharacters is matched literally, not as a pattern
 test('proseSection returns null for an absent heading and collapses whitespace otherwise', () => {
   assert.equal(proseSection('# A plan\n', 'Destination'), null)
   assert.equal(
-    proseSection('## Destination\n\nOne line\nand   a second.\n\n## Next\n\ntext\n', 'Destination'),
+    proseSection('## Statement\n\nDo the thing.\n\n## Acceptance\n\n- The thing is done\n\n## Destination\n\nOne line\nand   a second.\n\n## Next\n\ntext\n', 'Destination'),
     'One line and a second.',
   )
 })
@@ -534,4 +554,55 @@ test('an indented marker with content stays its own entry rather than joining', 
       `an indented ${JSON.stringify(marker)} entry must not be appended to the previous entry`,
     )
   }
+})
+
+// A boundary is judged against what was asked. Gates and reviewers judge the work against the
+// plan, so a plan that excludes something has to carry the request and its criteria.
+const BOUNDED = '## Destination\n\nSomewhere.\n\n## Out of Scope\n\n- Caching — its own spec\n'
+
+test('Statement and Acceptance are parsed, with the line of each acceptance entry', () => {
+  const md = `## Statement\n\nMake the report\nreadable.\n\n## Acceptance\n\n- A reader finds the total\n- Nothing is truncated\n\n${BOUNDED}`
+  const sections = parsePlanSections(md)
+  assert.equal(sections.statement, 'Make the report readable.')
+  assert.deepEqual(sections.acceptance.map((e) => e.text), ['A reader finds the total', 'Nothing is truncated'])
+  assert.equal(sections.acceptance[1].line, lineOf(md, 'Nothing is truncated'))
+})
+
+test('Out of Scope without a Statement is refused as a document-level defect', () => {
+  const md = `## Acceptance\n\n- It is done\n\n${BOUNDED}`
+  assert.throws(() => parsePlanSections(md), (error) => {
+    assert.ok(error instanceof PlanSectionError)
+    assert.equal(error.reason, 'missing-statement')
+    assert.equal(error.line, null)
+    assert.equal(error.entry, null)
+    return true
+  })
+})
+
+test('a Statement heading with no prose under it does not satisfy the requirement', () => {
+  const md = `## Statement\n\n## Acceptance\n\n- It is done\n\n${BOUNDED}`
+  assert.throws(() => parsePlanSections(md), (error) => error instanceof PlanSectionError && error.reason === 'missing-statement')
+})
+
+test('Out of Scope with a Statement but no Acceptance entry is refused', () => {
+  for (const acceptance of ['', '## Acceptance\n\n', '## Acceptance\n\nProse is not an entry.\n\n']) {
+    const md = `## Statement\n\nDo it.\n\n${acceptance}${BOUNDED}`
+    assert.throws(() => parsePlanSections(md), (error) => {
+      assert.ok(error instanceof PlanSectionError)
+      assert.equal(error.reason, 'missing-acceptance')
+      assert.equal(error.entry, null)
+      return true
+    }, acceptance)
+  }
+})
+
+test('a missing Destination is reported before a missing Statement', () => {
+  assert.throws(() => parsePlanSections('## Out of Scope\n\n- Caching — its own spec\n'),
+    (error) => error instanceof PlanSectionError && error.reason === 'missing-destination')
+})
+
+test('a plan without Out of Scope needs neither a Statement nor an Acceptance section', () => {
+  const sections = parsePlanSections('## Destination\n\nSomewhere.\n\n## Not Yet Specified\n\n- Which store owns this?\n')
+  assert.equal(sections.statement, null)
+  assert.deepEqual(sections.acceptance, [])
 })
