@@ -778,3 +778,14 @@ test('without integrated a dispatch still needs task branches, and never says in
   assert.throws(() => generateReviewDispatch({ ...BASE, branches: [] }), /task branch/)
   assert.doesNotMatch(generateReviewDispatch(BASE).reviewers[0].prompt, /integrated diff/)
 })
+
+// Task specs are written by the plan's author; the plan's `## Acceptance` entries are taken from
+// the request. Only the run review sees the whole diff, so only it is told to judge against them.
+test('a run dispatch judges the integrated diff against the plan Acceptance entries, and a phase dispatch does not', () => {
+  const sentence = /When that plan has an `## Acceptance` section, also compare the integrated diff against each of its entries/
+  for (const r of generateReviewDispatch(RUN).reviewers) {
+    assert.match(r.prompt, sentence)
+    assert.match(r.prompt, /an entry the diff does not satisfy is a spec-compliance finding/)
+  }
+  for (const r of generateReviewDispatch(BASE).reviewers) assert.doesNotMatch(r.prompt, /## Acceptance/)
+})
