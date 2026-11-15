@@ -10,8 +10,11 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 // in the string comes from outside this file.
 const packed = () => {
   const out = execSync('npm pack --dry-run --json --ignore-scripts', { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
-  return JSON.parse(out)[0]
+  return firstPackage(JSON.parse(out))
 }
+// `npm pack --json` prints an array of packages up to npm 11 and an object keyed by package name
+// from npm 12. Either way there is one package here.
+const firstPackage = (parsed) => (Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0])
 
 test('the npm package is fleetmates at the plugin manifest version', () => {
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))

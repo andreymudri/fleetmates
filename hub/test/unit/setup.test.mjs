@@ -739,7 +739,10 @@ posixTest('renamed Node init is idempotent and uninstall preserves unrelated gro
   try {
     fs.linkSync(process.execPath, executable)
   } catch (error) {
-    if (error.code !== 'EXDEV') throw error
+    // EXDEV: the two paths are on different filesystems. EPERM: Linux refuses a hard link to a
+    // file the caller does not own when fs.protected_hardlinks is on, which is the default on
+    // most distributions and is how a system-installed node looks to an ordinary user.
+    if (!['EXDEV', 'EPERM'].includes(error.code)) throw error
     fs.copyFileSync(process.execPath, executable, fs.constants.COPYFILE_FICLONE)
   }
   const original = JSON.parse(readFileSync(s.settings, 'utf8'))
