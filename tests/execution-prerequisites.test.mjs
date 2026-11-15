@@ -34,6 +34,8 @@ test('actual native console version probes retain stdout and stderr like synchro
       try {
         const candidate = await realpath(path.join(dir, 'codex'))
         await access(candidate, constants.X_OK)
+        // A version manager's link resolves to the manager, not to a codex: not a runtime.
+        if (path.basename(candidate) !== 'codex') continue
         available = true
         break
       } catch (error) {

@@ -32,7 +32,8 @@ async function runtimeOnPath({ env = process.env, root = process.cwd() }) {
     try {
       const executable = await realpath(path.join(dir, 'codex'))
       await access(executable, constants.X_OK)
-      if (outside(executable)) return true
+      // A version manager's link resolves to the manager, not to a codex: not a runtime.
+      if (outside(executable) && path.basename(executable) === 'codex') return true
     } catch (error) {
       if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error
     }
@@ -118,6 +119,22 @@ test('injected unavailable platform and empty PATH refuse required native author
   assert.equal(await knownNativeUnavailable({ root, platform: 'linux', env: { PATH: '' } }), 'Required native verification runtime is unavailable')
   await assert.rejects(createVerificationExecutor({ ...options, platform: 'linux', env: { PATH: '' } }), { message: 'Required native verification runtime is unavailable' })
   t.diagnostic('Injected platform/environment observations; no macOS or Windows native execution validated')
+})
+
+test('a codex on PATH that is a version manager link is not a native runtime', { skip: process.platform === 'win32' }, async t => {
+  const { root } = await fixture(t)
+  const bin = await realpath(await mkdtemp(path.join(tmpdir(), 'fm-shim-')))
+  t.after(() => rm(bin, { recursive: true, force: true }))
+  // What mise and asdf install: `codex` is a link to the manager's own executable.
+  await writeFile(path.join(bin, 'manager'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  await symlink(path.join(bin, 'manager'), path.join(bin, 'codex'))
+  const enforcement = resolveRoleCapabilities({ policy: { version: 1, roles: { implementer: {
+    read: true, write: true, execute: true, network: false, sharedRefs: false, publication: false
+  } } }, role: 'implementer', harness: 'codex', sandboxMode: 'clone', network: false }).enforcement
+  const options = { root, sandbox: { cwd: root, meta: { mode: 'clone', gitdir: path.join(root, '.git'), enforcement } }, enforcement,
+    platform: 'linux', env: { PATH: bin }, run: async () => assert.fail('a version manager link must not be executed') }
+  assert.equal(await knownNativeUnavailable({ root, platform: 'linux', env: { PATH: bin } }), 'Required native verification runtime is unavailable')
+  await assert.rejects(createVerificationExecutor(options), { message: 'Required native verification runtime is unavailable' })
 })
 
 test('fixture shell binding adapts the private report environment for injected Windows commands', () => {

@@ -17,6 +17,9 @@
 - `cost.stopAtBudget` (off by default). When on, `workflow` and `dispatch` start nothing once the
   priced spend of the current session's subagents reaches `cost.budget`. Teammates already running are not stopped.
 - The README and the `phase-gate` skill show static analysis tools as `command` checks.
+- `doctor --hooks --stop` prints, under `stopGuard`, the one case in which the Stop guard blocks
+  and every case in which it lets the stop through. The installation reference lists the same
+  cases, and the README says the guard fails open.
 
 ### Changed
 
@@ -31,6 +34,14 @@
   lock entry behind, when a waiting process creates its reclaim token inside the lock directory
   while that directory is being removed. The removal is repeated. Seen once in 480 contended
   acquisitions on Linux.
+- Required native verification no longer fails with "restrictions were not independently observed"
+  when the `codex` on `PATH` is a version manager's link (mise, asdf). Resolved, that link is the
+  manager itself, and under the clean environment the verification uses it tried to download a
+  Codex. Such an entry is now passed over, so the runtime is reported as unavailable unless the
+  real binary's directory is on `PATH`.
+- The test suite passes on npm 12, whose `pack --json` prints an object where npm 11 printed an
+  array, and on Linux with `fs.protected_hardlinks` on, where a deck test could not hard-link the
+  node binary.
 
 ## v2.9.2
 

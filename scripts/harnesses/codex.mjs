@@ -476,7 +476,11 @@ export async function createVerificationExecutor({ sandbox, root = sandbox.cwd, 
   let executable
   for (const dir of (env.PATH ?? '').split(path.delimiter)) {
     if (!path.isAbsolute(dir) || inside(worker, dir)) continue
-    try { const candidate = await realpath(path.join(dir, 'codex')); await access(candidate, constants.X_OK); if (!inside(worker, candidate)) { executable = candidate; break } } catch {}
+    // A `codex` that resolves to a file of another name is a version manager's link (mise, asdf):
+    // the manager decides what to run from the name it is called by. Run by its resolved path it
+    // is the manager itself, and run by name under the clean HOME used below it finds no install
+    // and tries to download one. Neither is the runtime, so such an entry is passed over.
+    try { const candidate = await realpath(path.join(dir, 'codex')); await access(candidate, constants.X_OK); if (!inside(worker, candidate) && path.basename(candidate) === 'codex') { executable = candidate; break } } catch {}
   }
   if (!executable) throw new Error('Required native verification runtime is unavailable')
   const privateRoot = await mkdtemp(path.join(os.tmpdir(), 'fm-verification-'))
