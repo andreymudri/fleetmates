@@ -15,6 +15,7 @@ import { captureEnvironment, validateEnvironmentRecipe } from './environment-pre
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
 import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
+import { planCheckPrompt } from './plan-check.mjs'
 import { renderUsage, annotateUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
 import { homedir } from 'node:os'
@@ -163,7 +164,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|plan-check|review-depth|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
@@ -197,6 +198,8 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   usage    [--session <id>] [--json] [--root <path>]
   retro    --run <id> [--date <YYYY-MM-DD>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
+  plan-check --plan <path> [--root <path>]
+  review-depth [--base <branch>] [--json] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--plan <path>] [--base <branch>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
@@ -523,6 +526,9 @@ export const REQUIRED = {
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
   'preview-check': [],
   'plan-drift': ['run', 'plan'],
+  // Belong to no run: one reads a plan file, the other the working branch's diff.
+  'plan-check': ['plan'],
+  'review-depth': [],
   'environment-check': ['file'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
@@ -627,6 +633,8 @@ export const KNOWN_FLAGS = {
   'collect-reviews': ['run', 'phase'],
   'preview-check': [],
   'plan-drift': ['run', 'plan', 'base'],
+  'plan-check': ['plan'],
+  'review-depth': ['base', 'json'],
   'environment-check': ['file', 'execute'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
@@ -6431,6 +6439,34 @@ export async function runCli(argv, io = { out: console.log }) {
         retro.markdown,
       ].join('\n'))
     }
+    return 0
+  }
+
+  if (command === 'plan-check') {
+    // The plan in the WORKING TREE, as `init-run` reads it: this runs before a run exists, on a
+    // plan that can still be corrected. It prints a prompt and does nothing else: no file is
+    // written and no reviewer is dispatched, so the orchestrator decides who reads it.
+    const planFile = path.resolve(root, String(flags.plan))
+    let planText
+    try {
+      planText = await readFile(planFile, 'utf8')
+    } catch (err) {
+      io.out(`plan-check: cannot read the plan: ${printable(err.message)}`)
+      return 2
+    }
+    let sections
+    try {
+      sections = parsePlanSections(planText)
+    } catch (err) {
+      io.out(planSectionsRefusal(err))
+      return 2
+    }
+    if (!sections.statement) {
+      io.out('plan-check: the plan has no Statement section, so there is nothing to compare it against.\n'
+        + 'Add `## Statement` with the request as it was made, and `## Acceptance` with what must be true of the finished work.')
+      return 2
+    }
+    io.out(printableBlock(JSON.stringify(planCheckPrompt({ planPath: String(flags.plan) }), null, 2)))
     return 0
   }
 
