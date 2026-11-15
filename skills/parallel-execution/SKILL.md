@@ -10,11 +10,10 @@ the `reference/` files beside it; the table at the end says which one to read wh
 
 ## Check the plan before init-run
 
-Before `init-run`, re-read the task statement the plan was written from and confirm two things:
-the plan's Out of Scope section excludes nothing the statement requires, and every task a
-`**Depends:**` line names exists in the plan. Nothing enforces this check: gates and reviewers
-judge the work against the plan, so a plan that leaves out what the statement requires passes
-every gate.
+Before `init-run`, run `plan-check --plan <planPath>` and give the prompt it prints to one
+`tm-reviewer`, then fix its high findings in the plan. Nothing else reads the plan against its
+statement: gates and reviewers judge the work against the plan, so a plan that leaves out what
+the statement requires passes every gate.
 
 ## Start the run
 

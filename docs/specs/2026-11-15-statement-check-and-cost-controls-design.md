@@ -89,14 +89,21 @@ keeps the map's standing rule that a map able to fail a phase is a map worth gam
 `executing-plans` uses the suggestion to size the inline final review. The fleet gate keeps the
 lenses its manifest declares.
 
+A file outside the diff counts as coupled when it changed in at least half of the commits that
+touched a file of the diff. Without that floor, one shared commit in a long history would make
+every change to an old file look coupled.
+
 The thresholds are defaults chosen without measurement. They are deferred: reopen them after the
 command has been used on ten real changes.
 
 ## 3. Budget stop (opt-in)
 
 A new key, `cost.stopAtBudget`, boolean, default `false`. Like the rest of `cost`, both config
-layers may carry it. Validation refuses `stopAtBudget: true` without a `cost.budget` and at
-least one entry in `cost.prices`, because the stop could never trigger.
+layers may carry it. `stopAtBudget: true` without a `cost.budget` and at least one entry in
+`cost.prices` is a configuration error, because the stop could never trigger. It is reported by
+`dispatch` and `workflow` (exit 2) and not while the config is resolved: the three keys may sit
+in different layers, and refusing at resolution would make every command fail, `config set`
+included, until the layers agreed.
 
 When it is on, `dispatch` and `workflow` price the current session's usage (the computation
 `usage` already does) before starting teammates:

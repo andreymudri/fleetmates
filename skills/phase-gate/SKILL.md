@@ -88,6 +88,16 @@ What this route does not cover:
 - A review check scoped `phase` is not reviewed here: it keeps a review per phase, through the
   same commands with `--phase <n>`.
 
+## Static analysis is a command check
+
+When a project wants complexity, duplication or dead code watched, add the tool as a `command`
+check in `fleetmates.gate.json`, never as a reviewer lens:
+
+    { "name": "dead-code", "kind": "command", "run": "<the project's own tool>" }
+
+A tool gives the same answer on the same tree and costs no model call. The manifest is protected:
+propose the entry to the user, who adds it.
+
 ## Reporting rule
 
 **Never report a phase done without a recorded PASS in `status.json`.** A check that was
