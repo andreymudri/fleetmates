@@ -20,24 +20,34 @@ const STORE = {
 }
 
 // A transcript store injected through CLAUDE_CONFIG_DIR, so no test reads real transcripts.
-async function withStore(root, files, fn) {
+// `session` is where the files go; `current` is the session the harness says this command runs in.
+async function withStore(root, files, fn, { session = 'sess-1', current = 'sess-1' } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'tm-budget-'))
-  const previous = process.env.CLAUDE_CONFIG_DIR
+  const previous = { dir: process.env.CLAUDE_CONFIG_DIR, id: process.env.CLAUDE_CODE_SESSION_ID }
   try {
     if (files) {
-      const subagents = path.join(dir, 'projects', projectSlug(root), 'sess-1', 'subagents')
+      const subagents = path.join(dir, 'projects', projectSlug(root), session, 'subagents')
       await mkdir(subagents, { recursive: true })
       for (const [name, body] of Object.entries(files)) await writeFile(path.join(subagents, name), body, 'utf8')
     }
     process.env.CLAUDE_CONFIG_DIR = dir
-    return await fn()
+    if (current === null) delete process.env.CLAUDE_CODE_SESSION_ID
+    else process.env.CLAUDE_CODE_SESSION_ID = current
+    return await fn(dir)
   } finally {
-    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR
-    else process.env.CLAUDE_CONFIG_DIR = previous
+    if (previous.dir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+    else process.env.CLAUDE_CONFIG_DIR = previous.dir
+    if (previous.id === undefined) delete process.env.CLAUDE_CODE_SESSION_ID
+    else process.env.CLAUDE_CODE_SESSION_ID = previous.id
     await rm(dir, { recursive: true, force: true })
   }
 }
-const capture = () => { const lines = []; return { io: { out: (t) => lines.push(t), err: () => {} }, lines } }
+// `lines` is stdout, where `workflow` prints the generated script; `notes` is stderr.
+const capture = () => {
+  const lines = []
+  const notes = []
+  return { io: { out: (t) => lines.push(t), err: (t) => notes.push(t) }, lines, notes }
+}
 const cost = (over = {}) => ({ currency: 'USD', budget: 450, stopAtBudget: true, prices: { '*': PER_TOKEN }, contextWindows: {}, ...over })
 
 test('budgetStop stops at the budget, not below it, and never without a priced total', () => {
@@ -53,7 +63,7 @@ test('budgetStop stops at the budget, not below it, and never without a priced t
 test('the stop lines state the spend, the unpriced agents and that nothing was started', () => {
   const priced = budgetStopLines({ total: 450, budget: 450, currency: 'USD', unpriced: 0 })
   assert.equal(priced.length, 2)
-  assert.match(priced[0], /^budget reached: .*450.* of .*450.* USD spent in this session$/)
+  assert.match(priced[0], /^budget reached: .*450.* of .*450.* USD spent by this session's subagents$/)
   assert.equal(priced[1], 'nothing was started (cost.stopAtBudget is on); teammates already running are not affected')
   const partial = budgetStopLines({ total: 450, budget: 450, currency: 'USD', unpriced: 2 })
   assert.equal(partial[1], '2 agents had no price and are not counted, so the total is a lower bound')
@@ -121,8 +131,38 @@ test('budgetRefusal stops at the budget and goes on below it, with the switch of
   await withStore(root, null, async () => {
     const unread = capture()
     assert.equal(await budgetRefusal(root, cost({ budget: 1 }), unread.io), null)
-    assert.equal(unread.lines.length, 1)
-    assert.match(unread.lines[0], /^budget not checked: /)
+    assert.deepEqual(unread.lines, [], 'the notice must stay off stdout')
+    assert.equal(unread.notes.length, 1)
+    assert.match(unread.notes[0], /^budget not checked: /)
+  })
+})
+
+// The spend measured is this session's. A session that has started no subagent has no store, so
+// "the newest session with a store" is an earlier one, and pricing that would refuse the first
+// dispatch of every session opened after a budget was reached.
+test('an earlier session over the budget does not stop a new session, and no session id means no check', async () => {
+  const root = path.resolve('/fake/budget-project')
+  await withStore(root, STORE, async () => {
+    const fresh = capture()
+    assert.equal(await budgetRefusal(root, cost({ budget: 1 }), fresh.io), null)
+    assert.deepEqual(fresh.lines, [])
+    assert.match(fresh.notes[0], /^budget not checked: /)
+  }, { session: 'sess-old', current: 'sess-new' })
+  await withStore(root, STORE, async () => {
+    const own = capture()
+    assert.equal(await budgetRefusal(root, cost({ budget: 1 }), own.io), 1, 'the same store stops the session it belongs to')
+  }, { session: 'sess-old', current: 'sess-old' })
+  await withStore(root, STORE, async () => {
+    const unknown = capture()
+    assert.equal(await budgetRefusal(root, cost({ budget: 1 }), unknown.io), null)
+    assert.deepEqual(unknown.lines, [])
+    assert.match(unknown.notes[0], /^budget not checked: CLAUDE_CODE_SESSION_ID is not set/)
+  }, { current: null })
+  // Without a stderr channel the notice still reaches the caller.
+  await withStore(root, null, async () => {
+    const lines = []
+    assert.equal(await budgetRefusal(root, cost({ budget: 1 }), { out: (t) => lines.push(t) }), null)
+    assert.match(lines[0], /^budget not checked: /)
   })
 })
 
@@ -157,6 +197,15 @@ test('workflow and dispatch start nothing once the session has spent the budget,
       const below = capture()
       assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], below.io), 0)
       assert.ok(below.lines.join('\n').includes('agent('), 'below the budget the workflow is printed as before')
+
+      // An unreadable store must not put a notice into the generated script.
+      process.env.CLAUDE_CODE_SESSION_ID = 'sess-with-no-store'
+      await writeFile(path.join(root, 'fleetmates.gate.json'), manifest(1, true))
+      const unread = capture()
+      assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root], unread.io), 0)
+      assert.ok(!unread.lines.join('\n').includes('budget'), 'stdout is the workflow source and must carry no notice')
+      assert.ok(unread.notes.some((l) => /^budget not checked: /.test(l)))
+      process.env.CLAUDE_CODE_SESSION_ID = 'sess-1'
 
       await writeFile(path.join(root, 'fleetmates.gate.json'), manifest(1, false))
       const off = capture()

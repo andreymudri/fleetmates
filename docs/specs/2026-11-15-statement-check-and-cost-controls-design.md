@@ -106,14 +106,17 @@ in different layers, and refusing at resolution would make every command fail, `
 included, until the layers agreed.
 
 When it is on, `dispatch` and `workflow` price the current session's usage (the computation
-`usage` already does) before starting teammates:
+`usage --session` already does, for the session named by `CLAUDE_CODE_SESSION_ID`) before
+starting teammates. The usage report covers the session's subagents, so that is what is priced:
 
 - If the priced total has reached the budget, the command starts nothing, prints the total, the
   budget and the number of unpriced agents, and exits 1: the command ran and declined, which is
   not a malformed invocation (2) or a failed verification (4).
 - Unpriced agents are not counted. The message says so, because the total is a lower bound.
-- If the session's usage cannot be read, the command proceeds and prints that the budget could
-  not be checked. A missing transcript store must not halt a run.
+- If the session's usage cannot be read, or the session id is not set, the command proceeds and
+  prints on stderr that the budget could not be checked. A missing transcript store must not halt
+  a run, and a session that has started no subagent has no store yet. Stderr, because `workflow`
+  prints the generated script on stdout.
 - Teammates already running are not touched.
 
 With the key off or absent, behaviour is exactly as today: the budget warns in `usage` only.

@@ -1638,13 +1638,21 @@ export async function completeEnforcementAnswer({ runId, taskId, planPath, baseB
 // The opt-in budget stop (`cost.stopAtBudget`), asked before a command starts teammates.
 // Returns the exit code to stop with, or null to go on.
 //
-// It prices the session's usage exactly as `usage` does, from the harness's transcript store.
-// That store is internal to the harness and may be absent or moved, so a failure to read it does
-// not halt a run: the command says the budget was not checked and goes on. A switch that is on
-// with nothing to measure against is a configuration error and is refused (2), because going on
-// silently would leave the operator believing a stop is armed.
+// It prices the usage of THIS session's subagents, as `usage --session` does, from the harness's
+// transcript store. The session is the one the harness names in CLAUDE_CODE_SESSION_ID, never
+// "the newest session with a store": a session that has started no subagent yet has no store, so
+// the newest one is an EARLIER session, and its spend would refuse the first dispatch of every
+// session opened after a budget was reached.
+//
+// The store is internal to the harness and may be absent or moved, and a new session has none
+// until its first subagent, so a failure to read it does not halt a run: the command says the
+// budget was not checked and goes on. That notice goes to stderr, because `workflow` prints the
+// generated script on stdout and a notice there would be a syntax error in it. A switch that is
+// on with nothing to measure against is a configuration error and is refused (2), because going
+// on silently would leave the operator believing a stop is armed.
+//
 // Exported so the suite can put the read-failure and misconfiguration paths to it directly.
-export async function budgetRefusal(root, cost, io) {
+export async function budgetRefusal(root, cost, io, env = process.env) {
   if (cost?.stopAtBudget !== true) return null
   try {
     assertBudgetStop(cost)
@@ -1653,15 +1661,21 @@ export async function budgetRefusal(root, cost, io) {
     io.out(err.message)
     return 2
   }
+  const note = (text) => (typeof io.err === 'function' ? io.err(text) : io.out(text))
+  const sessionId = env.CLAUDE_CODE_SESSION_ID
+  if (typeof sessionId !== 'string' || sessionId === '') {
+    note('budget not checked: CLAUDE_CODE_SESSION_ID is not set, so there is no session whose spend could be priced')
+    return null
+  }
   let raw
   try {
     raw = await readSessionUsage({
-      projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), '.claude'), 'projects'),
+      projectsDir: path.join(env.CLAUDE_CONFIG_DIR || path.join(homedir(), '.claude'), 'projects'),
       root,
-      sessionId: null,
+      sessionId,
     })
   } catch (err) {
-    io.out(`budget not checked: ${printable(err.message)}`)
+    note(`budget not checked: ${printable(err.message)}`)
     return null
   }
   const stop = budgetStop(annotateUsage(raw, cost))

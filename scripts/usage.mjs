@@ -136,7 +136,7 @@ export function budgetStop(report) {
 }
 
 export function budgetStopLines(stop) {
-  const lines = [`budget reached: ${money(stop.total)} of ${money(stop.budget)} ${stop.currency} spent in this session`]
+  const lines = [`budget reached: ${money(stop.total)} of ${money(stop.budget)} ${stop.currency} spent by this session's subagents`]
   if (stop.unpriced > 0) {
     lines.push(`${stop.unpriced} agent${stop.unpriced === 1 ? '' : 's'} had no price and ${stop.unpriced === 1 ? 'is' : 'are'} not counted, so the total is a lower bound`)
   }

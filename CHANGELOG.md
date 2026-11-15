@@ -13,7 +13,7 @@
 - `review-depth` measures a branch's diff and suggests how much review it needs: the suite only,
   two lenses, or every lens. It is advisory: it exits 0 whatever it suggests and no gate reads it.
 - `cost.stopAtBudget` (off by default). When on, `workflow` and `dispatch` start nothing once the
-  session's priced spend reaches `cost.budget`. Teammates already running are not stopped.
+  priced spend of the current session's subagents reaches `cost.budget`. Teammates already running are not stopped.
 - The README and the `phase-gate` skill show static analysis tools as `command` checks.
 
 ### Changed

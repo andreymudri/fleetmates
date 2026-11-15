@@ -297,11 +297,13 @@ and nothing else:
 | `cost.contextWindows` | `{ "<model>" \| "*": tokens }` | unset (no `ctx%` column) |
 | `harnesses.<name>.limitWaitMinutes` | integer 0 to 1440; 0 turns the wait off | `60` |
 
-With `cost.stopAtBudget` on, `workflow` and `dispatch` price the session's usage first and start
-nothing (exit 1) once it has reached `cost.budget`. Teammates already running are not stopped.
+With `cost.stopAtBudget` on, `workflow` and `dispatch` first price what the current session's
+subagents have used (the session named by `CLAUDE_CODE_SESSION_ID`, as `usage --session` reports
+it) and start nothing (exit 1) once that has reached `cost.budget`. Teammates already running are not stopped.
 Only priced spend counts, so with unpriced models the stop comes late; it needs `cost.budget`
 and at least one price, and refuses to run (exit 2) without them. If the session's usage cannot
-be read, the command says the budget was not checked and goes on.
+be read, or the session has started no subagent yet, the command says on stderr that the budget
+was not checked and goes on.
 
 The other `cost` keys only feed the `usage` report. All of them are allowed in either file. `cost.prices` and
 `cost.contextWindows` are objects, so they are hand-edited; all four prices of a model are
