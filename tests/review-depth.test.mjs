@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, realpath, writeFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, writeFile, rm } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { execFileSync } from 'node:child_process'
@@ -103,4 +103,91 @@ test('a file outside the diff that history couples to it is counted', async () =
     assert.equal(result.coupled, 1)
     assert.equal(result.suggestion, 'two-lenses')
   } finally { await rm(root, { recursive: true, force: true }) }
+})
+
+// One temporary repository per case: `main` holds what `setup` commits, `work` what `change` does.
+async function measured(setup, change, sub = '') {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'review-depth-')))
+  try {
+    const git = repo(root)
+    const commit = (message) => { git('add', '-A'); git('commit', '--quiet', '-m', message) }
+    await setup({ root, git, commit })
+    git('checkout', '--quiet', '-b', 'work')
+    await change({ root, git, commit })
+    const { code, out } = await cli(['review-depth', '--json', '--root', path.join(root, sub)])
+    assert.equal(code, 0, out)
+    return JSON.parse(out)
+  } finally { await rm(root, { recursive: true, force: true }) }
+}
+const write = (root, name, text) => writeFile(path.join(root, name), text)
+
+test('removed lines count as changed lines', async () => {
+  const result = await measured(
+    async ({ root, commit }) => { await write(root, 'a.txt', '1\n2\n3\n4\n5\n'); commit('base') },
+    async ({ root, commit }) => { await write(root, 'a.txt', '1\n5\n'); commit('remove three') },
+  )
+  assert.equal(result.files, 1)
+  assert.equal(result.lines, 3)
+})
+
+test('the diff is measured from the merge base, so work that landed on the base is not counted', async () => {
+  const result = await measured(
+    async ({ root, commit }) => { await write(root, 'a.txt', 'one\n'); commit('base') },
+    async ({ root, git, commit }) => {
+      await write(root, 'a.txt', 'one\ntwo\n'); commit('branch work')
+      git('checkout', '--quiet', 'main')
+      await write(root, 'landed.txt', 'x\n'.repeat(700)); commit('landed on base')
+      git('checkout', '--quiet', 'work')
+    },
+  )
+  assert.deepEqual([result.files, result.lines, result.suggestion], [1, 1, 'tests-only'])
+})
+
+test('a binary file is one changed file and no changed lines, and a rename is a removal and an addition', async () => {
+  const binary = await measured(
+    async ({ root, commit }) => { await write(root, 'a.txt', 'one\n'); commit('base') },
+    async ({ root, commit }) => { await writeFile(path.join(root, 'blob.bin'), Buffer.from([0, 1, 2, 0, 255, 0])); commit('binary') },
+  )
+  assert.deepEqual([binary.files, binary.lines], [1, 0])
+  const renamed = await measured(
+    async ({ root, commit }) => { await write(root, 'old.txt', 'a\nb\n'); commit('base') },
+    async ({ git, commit }) => { git('mv', 'old.txt', 'new.txt'); commit('rename') },
+  )
+  assert.deepEqual([renamed.files, renamed.lines], [2, 4])
+})
+
+test('a neighbour below the confidence floor, or one deleted since, is not counted as coupled', async () => {
+  // `rare.txt` changed with `src.txt` in 1 of the 4 commits that touched src: below one half.
+  const rare = await measured(
+    async ({ root, commit }) => {
+      await write(root, 'src.txt', '0\n'); await write(root, 'rare.txt', '0\n'); commit('together once')
+      for (const i of [1, 2]) { await write(root, 'src.txt', `${i}\n`); commit(`src alone ${i}`) }
+    },
+    async ({ root, commit }) => { await write(root, 'src.txt', 'changed\n'); commit('src') },
+  )
+  assert.deepEqual([rare.coupled, rare.suggestion], [0, 'tests-only'])
+  // `gone.txt` always changed with src, and no longer exists; `kept.txt` did too and does.
+  const gone = await measured(
+    async ({ root, git, commit }) => {
+      for (const i of [0, 1, 2]) {
+        for (const name of ['src.txt', 'gone.txt', 'kept.txt']) await write(root, name, `${i}\n`)
+        commit(`all three ${i}`)
+      }
+      git('rm', '--quiet', 'gone.txt'); commit('remove gone')
+    },
+    async ({ root, commit }) => { await write(root, 'src.txt', 'changed\n'); commit('src') },
+  )
+  assert.equal(gone.coupled, 1)
+})
+
+test('--root in a subdirectory measures the same repository-wide diff and still finds coupled files', async () => {
+  const result = await measured(
+    async ({ root, commit }) => {
+      await mkdir(path.join(root, 'sub'))
+      for (const i of [0, 1, 2]) { await write(root, 'sub/src.txt', `${i}\n`); await write(root, 'top.txt', `${i}\n`); commit(`pair ${i}`) }
+    },
+    async ({ root, commit }) => { await write(root, 'sub/src.txt', 'changed\n'); commit('src') },
+    'sub',
+  )
+  assert.deepEqual([result.files, result.lines, result.coupled], [1, 2, 1])
 })

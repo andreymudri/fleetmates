@@ -46,7 +46,10 @@ A new command prints one reviewer prompt:
 
 - It reads the plan from the working tree, refuses a plan with a section defect, and refuses a
   plan that has no Statement (there is nothing to compare).
-- The prompt assigns the lens `statement`. The reviewer reads only the plan. It reports each
+- The prompt assigns the lens `statement`. The reviewer reads the plan, and may read the code for
+  one question: whether an Acceptance entry can be met without what an Out of Scope entry
+  excludes. (Decided by the owner on 2026-11-15, replacing a plan-only reviewer: the eval's plan
+  excluded helpers the request never named, which only the code shows.) It reports each
   requirement in the Statement or Acceptance that an Out of Scope entry excludes, that no task
   covers, or that depends on a task the plan does not contain. Findings use the reviewer's
   existing severity scale; a dropped requirement is `high`.

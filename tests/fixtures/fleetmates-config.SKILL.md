@@ -102,6 +102,16 @@ has exactly one implementation and the interactive path can never produce a file
 would reject. The one deliberate exception is the enforcement keys above, which `config` cannot
 write at all — those are hand-edited by design, not because this skill's rule was skipped.
 
+## The budget stop
+
+`cost.budget` only warns in the `usage` report. With `cost.stopAtBudget` set to `true`, `workflow`
+and `dispatch` start nothing once the priced spend of the current session's subagents reaches the
+budget; teammates already running go on. It needs `cost.budget` and at least one `cost.prices`
+entry, and the two commands exit 2 without them. The main session's own tokens are not counted,
+so set the budget below the real limit.
+
+    node "<fleetmates root>/scripts/cli.mjs" config set cost.stopAtBudget true --root <project root>
+
 ## Harness settings
 
 A run driven on a harness other than Claude Code reads its per-harness settings from

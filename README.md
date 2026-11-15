@@ -186,7 +186,8 @@ Seeing what is actually there:
 - `plan-drift --run <id> --plan <path>` — what changed in the plan since the anchor, and whether it
   changed too late to reach the work
 - `plan-check --plan <path>` — prints the prompt for one reviewer that reads the plan against its
-  own `## Statement` and `## Acceptance`, and reports what the plan leaves out. It writes and
+  own `## Statement` and `## Acceptance`, and reports what the plan leaves out. The reviewer may
+  read the code to see whether something an `## Out of Scope` entry excludes is needed. It writes and
   dispatches nothing. Gates and reviewers judge the work against the plan, so this is the one
   check that runs the other way
 - `review-depth [--base <branch>]` — measures the branch's diff and suggests `tests-only`,
@@ -300,7 +301,9 @@ and nothing else:
 With `cost.stopAtBudget` on, `workflow` and `dispatch` first price what the current session's
 subagents have used (the session named by `CLAUDE_CODE_SESSION_ID`, as `usage --session` reports
 it) and start nothing (exit 1) once that has reached `cost.budget`. Teammates already running are not stopped.
-Only priced spend counts, so with unpriced models the stop comes late; it needs `cost.budget`
+Only priced spend counts, and the main session's own tokens are not in the usage report, so the
+real total is higher than what is compared: set the budget below your limit. With unpriced
+models the stop comes later still; it needs `cost.budget`
 and at least one price, and refuses to run (exit 2) without them. If the session's usage cannot
 be read, or the session has started no subagent yet, the command says on stderr that the budget
 was not checked and goes on.

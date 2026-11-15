@@ -6532,11 +6532,13 @@ export async function runCli(argv, io = { out: console.log }) {
     const git = createGit({ cwd: root })
     let stat
     let sets
+    let prefix
     try {
       const base = await resolveBaseBranch(git, typeof flags.base === 'string' ? flags.base : undefined)
       stat = await git.diffStat({ base, branch: 'HEAD' })
       // The same 500-commit window a brief's blast radius is computed over.
       sets = await git.commitFileSets({ limit: 500 })
+      prefix = await repoPrefix(root)
     } catch (err) {
       io.out(`review-depth: ${printable(err.message)}`)
       return 2
@@ -6544,8 +6546,14 @@ export async function runCli(argv, io = { out: console.log }) {
     // Both lists are already relative to the repository root: `git diff` and `git log` name
     // paths from the top of the work tree whatever directory they run in.
     const files = stat.files
-    const coupled = neighboursOf(buildCoupling(sets), files, { top: Number.MAX_SAFE_INTEGER })
-      .filter((n) => n.confidence >= DEPTH_LIMITS.coupledConfidence).length
+    // History names every path that ever existed. A neighbour that has since been deleted cannot
+    // be broken by this change, so only files still in the work tree count.
+    const top = path.resolve(root, ...prefix.split('/').filter(Boolean).map(() => '..'))
+    const present = async (file) => { try { await lstat(path.join(top, file)); return true } catch { return false } }
+    let coupled = 0
+    for (const n of neighboursOf(buildCoupling(sets), files, { top: Number.MAX_SAFE_INTEGER })) {
+      if (n.confidence >= DEPTH_LIMITS.coupledConfidence && await present(n.path)) coupled += 1
+    }
     const result = reviewDepth({ files: files.length, lines: stat.lines, coupled })
     io.out(flags.json === true ? JSON.stringify(result, null, 2) : renderReviewDepth(result))
     return 0
