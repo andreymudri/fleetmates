@@ -113,3 +113,10 @@ exist. Dispatch the whole phase through the CLI instead:
 This is worktree-isolated and gate-identical: it produces the same result contract the Workflow
 and Agent paths do, and resuming a run re-runs the same `dispatch`. The harness name is the one
 the orchestrator is itself running in, passed explicitly.
+
+## When dispatch is refused for the budget
+
+With `cost.stopAtBudget` on, `workflow` and `dispatch` exit 1 and print `budget reached` once the
+priced spend of this session's subagents has reached `cost.budget`. Nothing was started. Do not
+retry and do not turn the switch off yourself: report the spend and the budget to the user, who
+decides whether to raise it. Teammates already running are not affected.
