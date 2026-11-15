@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- `doctor --hooks --stop` prints, under `stopGuard`, the one case in which the Stop guard blocks
+  and every case in which it lets the stop through. The installation reference lists the same
+  cases, and the README says the guard fails open.
+
 ### Fixed
 
 - Releasing or reclaiming a storage lock no longer fails with `ENOTEMPTY`, leaving a `.stale`

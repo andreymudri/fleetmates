@@ -24,9 +24,20 @@ node scripts/cli.mjs bind-session --run <id> --plan <path> --session <session-id
 
 The guard recomputes `finish --enforcement-only`, blocks once on failed or unresolved
 checks, and displays skipped obligations. A cheap PASS does not establish delivery
-completion. Missing bindings, changed requirements, process errors, timeouts and the
-harness retry escape allow stopping. Process death is not prevented. The unbound path
-costs one Git discovery process. Verify live callback behavior with `doctor --hooks --stop --session <session-id>`
+completion: command checks and reviews are not rerun.
+
+It blocks in that one case and fails open in every other. A stop is allowed when:
+
+- the session has no binding, or the bound run's directory no longer exists;
+- the binding names another repository or branch than the one the session is on;
+- the plan's requirements changed since the binding;
+- the run is suspended or abandoned;
+- the harness is retrying after a block (`stop_hook_active`);
+- the guard errors, exceeds its 12-second bound, or is given unreadable or oversized input.
+
+Process death and abrupt harness loss are not prevented. The unbound path
+costs one Git discovery process. `doctor --hooks --stop` prints this same list
+under `stopGuard`. Verify live callback behavior with `doctor --hooks --stop --session <session-id>`
 in the installed harness. A receipt records that this handler fired, not that delivery passed.
 
 Use `suspend --run <id> --plan <path> --base <base>` to pause, `resume --run <id>` to

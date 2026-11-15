@@ -80,6 +80,8 @@ regardless.
 Installing registers a machine-wide synchronous `SubagentStop` hook, a main-session `Stop` guard
 and an update check that runs at most once a day. [docs/reference/installation.md](docs/reference/installation.md) says
 exactly what each one does and how to turn the update check off.
+The `Stop` guard blocks only a bound, running run with failed or unresolved checks, and lets the
+stop through in every other case, including its own errors; the reference lists each one.
 
 ## How it works
 

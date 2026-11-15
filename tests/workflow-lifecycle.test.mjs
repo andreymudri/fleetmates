@@ -130,6 +130,13 @@ test('unbound real Stop entry point costs one Git process and produces a session
   assert.equal(lines.length, 1, 'unbound hook must perform only repository discovery')
   const report = await hookDoctor({ env, includeStop: true, sessionId: 'unbound-session' })
   assert.equal(report.hooks.find(h => h.hook === 'Stop').state, 'observed')
+  // A Stop receipt is easy to over-read, so the report says beside it what the guard does not do.
+  assert.match(report.stopGuard.blocks, /^a session bound to a running run whose enforcement-only finish reports failed or unresolved checks/)
+  assert.equal(report.stopGuard.allows.length, 6)
+  assert.ok(report.stopGuard.allows.some(line => /suspended or abandoned/.test(line)))
+  assert.match(report.stopGuard.skipped, /not completion evidence/)
+  assert.equal(report.stopGuard.notPrevented, 'process death and abrupt harness loss')
+  assert.equal((await hookDoctor({ env, sessionId: 'unbound-session' })).stopGuard, undefined, 'without --stop the report is as before')
   assert.equal(report.ok, false, 'Stop alone cannot prove the other callbacks fired')
   const { readEvents } = await import('../scripts/event-ledger.mjs')
   const { receiptPath } = await import('../scripts/context-hook.mjs')
