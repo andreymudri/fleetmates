@@ -17,7 +17,7 @@ import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { planCheckPrompt } from './plan-check.mjs'
 import { reviewDepth, renderReviewDepth, DEPTH_LIMITS } from './review-depth.mjs'
-import { renderUsage, annotateUsage } from './usage.mjs'
+import { renderUsage, annotateUsage, budgetStop, budgetStopLines } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
 import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
@@ -26,7 +26,7 @@ import { composeBatchBrief, composeBrief } from './brief.mjs'
 import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses, protectedPaths } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
-  getKey, setKey, unsetKey, ensureGitignored, ConfigError,
+  getKey, setKey, unsetKey, ensureGitignored, ConfigError, assertBudgetStop,
   GATE_FILE, LOCAL_FILE, ROLES, EXPERIMENTAL_HARNESSES,
 } from './config.mjs'
 import * as configModule from './config.mjs'
@@ -1635,6 +1635,41 @@ export async function completeEnforcementAnswer({ runId, taskId, planPath, baseB
 // named `main`, the heuristic silently prefers it, mergeBase(main, run) collapses onto the
 // run tip, and every downstream diff and commit range becomes vacuous. When both exist and
 // the caller did not disambiguate, refuse rather than guess.
+// The opt-in budget stop (`cost.stopAtBudget`), asked before a command starts teammates.
+// Returns the exit code to stop with, or null to go on.
+//
+// It prices the session's usage exactly as `usage` does, from the harness's transcript store.
+// That store is internal to the harness and may be absent or moved, so a failure to read it does
+// not halt a run: the command says the budget was not checked and goes on. A switch that is on
+// with nothing to measure against is a configuration error and is refused (2), because going on
+// silently would leave the operator believing a stop is armed.
+// Exported so the suite can put the read-failure and misconfiguration paths to it directly.
+export async function budgetRefusal(root, cost, io) {
+  if (cost?.stopAtBudget !== true) return null
+  try {
+    assertBudgetStop(cost)
+  } catch (err) {
+    if (!(err instanceof ConfigError)) throw err
+    io.out(err.message)
+    return 2
+  }
+  let raw
+  try {
+    raw = await readSessionUsage({
+      projectsDir: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(homedir(), '.claude'), 'projects'),
+      root,
+      sessionId: null,
+    })
+  } catch (err) {
+    io.out(`budget not checked: ${printable(err.message)}`)
+    return null
+  }
+  const stop = budgetStop(annotateUsage(raw, cost))
+  if (!stop) return null
+  for (const line of budgetStopLines(stop)) io.out(line)
+  return 1
+}
+
 async function resolveBaseBranch(git, flag) {
   if (flag) {
     // Checked HERE because every consumer splices the answer into `refs/heads/<name>`: a value
@@ -4605,6 +4640,9 @@ export async function runCli(argv, io = { out: console.log }) {
     const phase = Number(flags.phase)
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
+    // Before anything is generated: a workflow printed past the budget would be dispatched.
+    const overBudget = await budgetRefusal(root, resolved.cost, io)
+    if (overBudget !== null) return overBudget
 
     // Concrete model names never enter this repository or fleetmates.gate.json — they live
     // in the dispatching skill, which passes its own tier map through here. Absent, the
@@ -4790,6 +4828,9 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
+    // Before the harness is probed or a sandbox is cut: past the budget, nothing is started.
+    const overBudget = await budgetRefusal(root, resolved.cost, io)
+    if (overBudget !== null) return overBudget
 
     let adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
