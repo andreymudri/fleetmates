@@ -272,6 +272,26 @@ export function createGit({ cwd = process.cwd(), exec = defaultGitExec } = {}) {
       ])
       return out.split('\0').filter(Boolean)
     },
+    // Files and changed lines of `base...branch`, measured against the merge base like
+    // `changedFiles`, and with the same option and pathspec guards. A binary file reports `-`
+    // for both counts; it is one changed file and no changed lines.
+    async diffStat({ base, branch }) {
+      if (!isNonEmptyString(base) || !isNonEmptyString(branch)) {
+        throw new GitError(`diffStat requires non-empty base and branch strings, got base=${JSON.stringify(base)} branch=${JSON.stringify(branch)}`)
+      }
+      const out = await run([
+        '-c', 'core.quotePath=false', 'diff', '--numstat', '--no-renames', '-z',
+        '--end-of-options', `${base}...${branch}`, '--',
+      ])
+      const files = []
+      let lines = 0
+      for (const record of out.split('\0').filter(Boolean)) {
+        const [added, deleted, ...rest] = record.split('\t')
+        files.push(rest.join('\t'))
+        lines += (Number(added) || 0) + (Number(deleted) || 0)
+      }
+      return { files, lines }
+    },
     async headSha() {
       return (await run(['rev-parse', 'HEAD'])).trim()
     },

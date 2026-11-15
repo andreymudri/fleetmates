@@ -31,11 +31,13 @@ Never start implementation on `main`/`master` without explicit consent from your
 Read it fully before touching code. Raise concerns with your human partner before starting —
 gaps, unclear steps, or a task that looks bigger than a single sitting.
 
-Before the first task, re-read the task statement the plan was written from and confirm two
-things: the plan's Out of Scope section excludes nothing the statement requires, and every task a
-`**Depends:**` line names exists in the plan. Nothing enforces this check: the plan's own
-verification steps judge the work against the plan, so a plan that leaves out what the statement
-requires passes them.
+Before the first task, run `plan-check --plan <planPath>` and give the prompt it prints to one
+`tm-reviewer`, then fix its high findings in the plan. Nothing else reads the plan against its
+statement: the plan's own verification steps judge the work against the plan, so a plan that
+leaves out what the statement requires passes them.
+
+A plan with no `## Statement` section is refused by `plan-check`. Add it, with `## Acceptance`,
+before going on (see `writing-plans`).
 
 ## 3. Execute and checkpoint
 
@@ -57,6 +59,16 @@ skill protects nothing. Reserve that machinery for work that has actually grown 
 (see `parallel-execution` and `phase-gate`).
 
 ## 4. Finish
+
+Before the final review, ask how much review the change needs:
+
+    node "<fleetmates root>/scripts/cli.mjs" review-depth --base <base branch> --root <project root>
+
+It suggests `tests-only`, `two-lenses` (correctness and tests) or `all-lenses` from the size of
+the diff and the files history couples to it. Size the final review by the suggestion, and tell
+each reviewer to judge the diff against the plan's `## Acceptance` entries as well as the task
+specs. The suggestion is advisory: the command exits 0 whatever it says, no gate reads it, and
+your human partner's standing instructions outrank it.
 
 After all tasks are complete and verified, use `finishing-a-development-branch` (if available)
 or otherwise confirm tests pass and present integration options to your human partner.

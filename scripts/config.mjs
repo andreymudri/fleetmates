@@ -259,7 +259,8 @@ export function validateHarnesses(harnesses, file) {
 }
 
 // What the `usage` report prices and warns about. Not an enforcement key: nothing here changes a
-// verdict or stops a run (the budget only warns), so both layers may carry it. Prices are per
+// verdict, so both layers may carry it. The budget only warns unless `stopAtBudget` is on, and
+// then it stops NEW dispatches only (see `assertBudgetStop` and scripts/usage.mjs). Prices are per
 // million tokens in `currency`, keyed by the model name the report shows, with `*` as the fallback
 // for any model not listed (the usual entry for a fleet pointed at one provider, such as DeepSeek).
 const PRICE_FIELDS = ['input', 'output', 'cacheRead', 'cacheWrite']
@@ -278,7 +279,7 @@ function plainObject(v) {
 export function validateCost(cost, file) {
   if (!plainObject(cost)) throw new ConfigError('cost must be an object')
   for (const field of Object.keys(cost)) {
-    if (!['currency', 'prices', 'budget', 'contextWindows'].includes(field)) {
+    if (!['currency', 'prices', 'budget', 'stopAtBudget', 'contextWindows'].includes(field)) {
       throw new ConfigError(`unknown key in ${file}: cost.${field}`)
     }
   }
@@ -287,6 +288,9 @@ export function validateCost(cost, file) {
   }
   if (cost.budget !== undefined && !(typeof cost.budget === 'number' && Number.isFinite(cost.budget) && cost.budget > 0)) {
     throw new ConfigError('cost.budget must be a number > 0')
+  }
+  if (cost.stopAtBudget !== undefined && typeof cost.stopAtBudget !== 'boolean') {
+    throw new ConfigError('cost.stopAtBudget must be true or false')
   }
   if (cost.prices !== undefined) {
     if (!plainObject(cost.prices)) throw new ConfigError('cost.prices must be an object keyed by model')
@@ -316,6 +320,17 @@ export function validateCost(cost, file) {
     }
   }
   return cost
+}
+
+// `stopAtBudget` needs something to stop at and something to price with. Checked on the RESOLVED
+// cost and only by the commands that act on the switch, never while resolving the config: the
+// three keys may sit in different layers, so no single layer can be judged, and refusing at
+// resolution would make every command fail, `config set` included, until the layers agreed.
+export function assertBudgetStop(cost) {
+  if (cost?.stopAtBudget !== true) return
+  if (!(cost.budget > 0) || Object.keys(cost.prices ?? {}).length === 0) {
+    throw new ConfigError('cost.stopAtBudget needs cost.budget and at least one cost.prices entry: without them spend cannot be measured against a budget')
+  }
 }
 
 // The watchdog's knobs. Not an enforcement key: nothing here changes a verdict, it only decides how
@@ -587,6 +602,7 @@ export async function loadConfig(root) {
       cost: {
         currency: local?.cost?.currency ?? gate.cost?.currency ?? 'USD',
         budget: local?.cost?.budget ?? gate.cost?.budget ?? null,
+        stopAtBudget: local?.cost?.stopAtBudget ?? gate.cost?.stopAtBudget ?? false,
         prices: { ...gate.cost?.prices, ...local?.cost?.prices },
         contextWindows: { ...gate.cost?.contextWindows, ...local?.cost?.contextWindows },
       },
@@ -664,7 +680,7 @@ export function validateKey(dotted, value, file = GATE_FILE) {
   // validateHarnesses a one-key harness object, reusing its per-field rules rather than
   // duplicating them here. tierModels is deliberately absent: it is an object, not a scalar
   // `config set` can parse from an argv string.
-  const costMatch = /^cost\.(currency|budget)$/.exec(dotted)
+  const costMatch = /^cost\.(currency|budget|stopAtBudget)$/.exec(dotted)
   if (costMatch) { validateCost({ [costMatch[1]]: value }, LOCAL_FILE); return value }
   const harnessMatch = /^harnesses\.([a-z]+)\.(sandbox|network|timeoutMinutes|limitWaitMinutes)$/.exec(dotted)
   if (harnessMatch) {

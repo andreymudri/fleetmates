@@ -2158,26 +2158,28 @@ test('every skill with reference files ends its core with a table naming each of
   assert.deepEqual(split, ['parallel-execution', 'phase-gate'], 'the skills split into a core and references')
 })
 
-test('parallel-execution, executing-plans and writing-plans each carry the plan check, stated as unenforced', async () => {
+test('parallel-execution, executing-plans and writing-plans each send the plan to one reviewer, and say why nothing else catches it', async () => {
   const pe = (await skill('parallel-execution')).doc.section(/^Check the plan before init-run$/)
   assert.equal(pe.label, 'parallel-execution/SKILL.md § Check the plan before init-run', 'the plan check belongs to the core')
   assertClaim(pe, {
     label: 'plan check (parallel-execution)',
-    claim: /^Before init-run, re-read the task statement the plan was written from and confirm two things: the plan's Out of Scope section excludes nothing the statement requires, and every task a Depends: line names exists in the plan\.$/,
-    then: /^Nothing enforces this check: gates and reviewers judge the work against the plan, so a plan that leaves out what the statement requires passes every gate\.$/,
-    subject: /Out of Scope|Depends|statement|enforce/i,
+    claim: /^Before init-run, run plan-check --plan <planPath> and give the prompt it prints to one tm-reviewer, then fix its high findings in the plan\.$/,
+    then: /^Nothing else reads the plan against its statement: gates and reviewers judge the work against the plan, so a plan that leaves out what the statement requires passes every gate\.$/,
+    subject: /plan-check|statement|tm-reviewer/i,
   })
   assertClaim((await skill('executing-plans')).doc.section(/^2\. Review the plan critically$/), {
     label: 'plan check (executing-plans)',
-    claim: /^Before the first task, re-read the task statement the plan was written from and confirm two things: the plan's Out of Scope section excludes nothing the statement requires, and every task a Depends: line names exists in the plan\.$/,
-    then: /^Nothing enforces this check: the plan's own verification steps judge the work against the plan, so a plan that leaves out what the statement requires passes them\.$/,
-    subject: /Out of Scope|Depends|statement|enforce/i,
+    claim: /^Before the first task, run plan-check --plan <planPath> and give the prompt it prints to one tm-reviewer, then fix its high findings in the plan\.$/,
+    then: /^Nothing else reads the plan against its statement: the plan's own verification steps judge the work against the plan, so a plan that leaves out what the statement requires passes them\.$/,
+    subject: /plan-check|statement|tm-reviewer/i,
+    // What plan-check does with a plan that has nothing to compare against, which it does do.
+    allow: [/^A plan with no ## Statement section is refused by plan-check\.$/],
   })
   assertClaim((await skill('writing-plans')).doc.section(/^Self-review$/), {
     label: 'plan check (writing-plans)',
-    claim: /^Statement check — re-read the task statement the plan was written from: the Out of Scope section excludes nothing the statement requires, and every task a Depends: line names exists in the plan\.$/,
-    then: /^Nothing enforces this check: gates and reviewers judge the work against the plan, so a plan that leaves out what the statement requires passes every gate\.$/,
-    subject: /Out of Scope|Depends|task statement|enforce/i,
+    claim: /^Statement check — run plan-check and give the prompt it prints to one tm-reviewer, then fix its high findings in the plan \(see "Statement and Acceptance" above\)\.$/,
+    then: /^Nothing else reads the plan against its statement: gates and reviewers judge the work against the plan, so a plan that leaves out what the statement requires passes every gate\.$/,
+    subject: /plan-check|task statement|tm-reviewer/i,
   })
 })
 

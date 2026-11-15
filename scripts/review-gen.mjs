@@ -164,7 +164,7 @@ const INVISIBLE = new RegExp('[\\p{Cc}\\p{Cf}\\p{Co}\\p{Zl}\\p{Zp}]', 'u')
 // delimiter is gone — and refusing it denied honest manifests (`node -e "console.log(\`ok\`)"`)
 // while taking the correctness and security dispatches down with claims, for a value neither of
 // them reads.
-function dataLiteral(value) {
+export function dataLiteral(value) {
   const quoted = JSON.stringify(String(value))
   let out = ''
   for (const ch of quoted) {
@@ -291,7 +291,7 @@ export function generateReviewDispatch({
         `  git diff ${integrated.mergeBaseSha}..${integrated.tipSha}`,
         'Diff exactly that range, by those two shas, never task branch by task branch.',
         '',
-        'Stage 1: spec compliance. Read the tracked plan at the merge-base commit above; compare the changed files against the files its tasks declare, and the committed changes against their acceptance criteria. If scope or acceptance fails, return only spec-compliance findings and stop before quality review. Reproduce defects and use the existing severity and stamp contract. If the tracked spec cannot be located or verified, return no findings with unableToVerify naming the missing evidence; never claim a clean review.',
+        'Stage 1: spec compliance. Read the tracked plan at the merge-base commit above; compare the changed files against the files its tasks declare, and the committed changes against their acceptance criteria. When that plan has an `## Acceptance` section, also compare the integrated diff against each of its entries: they state what the request needs, and an entry the diff does not satisfy is a spec-compliance finding even when every task met its own criteria. If scope or acceptance fails, return only spec-compliance findings and stop before quality review. Reproduce defects and use the existing severity and stamp contract. If the tracked spec cannot be located or verified, return no findings with unableToVerify naming the missing evidence; never claim a clean review.',
       ]
       : [
         `Review the phase ${phaseName} diff of ${NAMES.product} run ${runId} through exactly one lens: ${lens}.`,

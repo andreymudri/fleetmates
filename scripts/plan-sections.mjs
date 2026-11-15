@@ -1,4 +1,5 @@
-// Header sections of a plan: `## Destination`, `## Not Yet Specified` and `## Out of Scope`.
+// Header sections of a plan: `## Destination`, `## Not Yet Specified`, `## Out of Scope`,
+// `## Statement` and `## Acceptance`.
 //
 // This module owns exactly one thing — the `##` sections that sit above the task list — and it
 // owns the extraction rules that `parseConstraints` in `scripts/cli.mjs` used to own alone. Each
@@ -156,12 +157,14 @@ export class PlanSectionError extends Error {
 }
 
 /**
- * Parse a plan's three optional header sections, refusing a malformed one.
+ * Parse a plan's optional header sections, refusing a malformed one.
  *
  * @param {string} markdown plan markdown
  * @returns {{ destination: string | null, notYetSpecified: { text: string, line: number }[],
- *   outOfScope: { text: string, line: number }[] }}
- * @throws {PlanSectionError} on a defect in `## Out of Scope` or `## Not Yet Specified`
+ *   outOfScope: { text: string, line: number }[], statement: string | null,
+ *   acceptance: { text: string, line: number }[] }}
+ * @throws {PlanSectionError} on a defect in `## Out of Scope` or `## Not Yet Specified`, or when
+ *   `## Out of Scope` is present without a Destination, a Statement or an Acceptance entry
  */
 export function parsePlanSections(markdown) {
   const destination = proseSection(markdown, 'Destination')
@@ -185,6 +188,25 @@ export function parsePlanSections(markdown) {
   if (hasOutOfScope && !destination) {
     throw new PlanSectionError('this plan has an Out of Scope section but no Destination', {
       reason: 'missing-destination',
+    })
+  }
+
+  // The same dependency, one step further back: a boundary is judged against what was ASKED, and
+  // gates and reviewers only ever judge the work against the plan. A plan that excludes something
+  // must therefore carry the request it was written from and the criteria taken from it, so that
+  // `plan-check` has something to compare the boundary against. Triggered by the heading, like
+  // the Destination rule, and satisfied by prose (Statement) and by at least one entry
+  // (Acceptance). A plan with no Out of Scope section is not asked for either.
+  const statement = proseSection(markdown, 'Statement')
+  const acceptance = bulletSection(markdown, 'Acceptance')
+  if (hasOutOfScope && !statement) {
+    throw new PlanSectionError('this plan has an Out of Scope section but no Statement', {
+      reason: 'missing-statement',
+    })
+  }
+  if (hasOutOfScope && acceptance.length === 0) {
+    throw new PlanSectionError('this plan has an Out of Scope section but no Acceptance entry', {
+      reason: 'missing-acceptance',
     })
   }
 
@@ -220,5 +242,5 @@ export function parsePlanSections(markdown) {
     )
   })
 
-  return { destination, notYetSpecified, outOfScope }
+  return { destination, notYetSpecified, outOfScope, statement, acceptance }
 }

@@ -185,6 +185,14 @@ Seeing what is actually there:
   describe, so a stalled row is a prompt to look, never gate evidence
 - `plan-drift --run <id> --plan <path>` — what changed in the plan since the anchor, and whether it
   changed too late to reach the work
+- `plan-check --plan <path>` — prints the prompt for one reviewer that reads the plan against its
+  own `## Statement` and `## Acceptance`, and reports what the plan leaves out. The reviewer may
+  read the code to see whether something an `## Out of Scope` entry excludes is needed. It writes and
+  dispatches nothing. Gates and reviewers judge the work against the plan, so this is the one
+  check that runs the other way
+- `review-depth [--base <branch>]` — measures the branch's diff and suggests `tests-only`,
+  `two-lenses` or `all-lenses` for the final review. Advisory: it exits 0 whatever it suggests and
+  no gate reads it
 - `digest --run <id>` — the compact fleet status board
 
 Cost and retrospective:
@@ -193,7 +201,8 @@ Cost and retrospective:
   cache reads, output and the **peak** context any one turn carried. With `cost.prices` set it adds
   a cost column in your currency, and with `cost.contextWindows` it shows each agent's peak as a
   share of its window, marking 85% or more with `!`. With `cost.budget` it warns at 80% and when
-  the budget is used up. The budget only warns: the exit code does not change and nothing stops.
+  the budget is used up. The budget only warns: the exit code does not change and nothing stops,
+  unless `cost.stopAtBudget` is on (see Configuration).
   The cost is an estimate from tokens at your prices, not the provider's bill
 - `retro --run <id>` — proposed learnings from what the run recorded: fix rounds per task, a gate
   last recorded failing, teammates that were orphaned or failed, and provider-limit waits. It prints
@@ -249,6 +258,20 @@ confirm. `fileset` and `ownership` run on every phase even when the manifest omi
 dependencies into the preview, protected paths, JUnit reports and declared skips are covered in
 [docs/reference/gate-manifest.md](docs/reference/gate-manifest.md).
 
+Static analysis belongs in the manifest as `command` checks. A complexity limit, a duplication
+detector and a dead-code finder each give the same answer on the same tree and cost no model
+call, which a reviewer lens asked to notice the same things does not. Use whatever your project
+already has; the entries look like this:
+
+```json
+{ "name": "complexity", "kind": "command", "run": "npx eslint --max-warnings 0 --rule 'complexity: [1, 12]' src" },
+{ "name": "duplication", "kind": "command", "run": "npx jscpd --threshold 3 src" },
+{ "name": "dead-code", "kind": "command", "run": "npx knip" }
+```
+
+A check fails the phase when its command exits non-zero, so set each tool's threshold to what
+the code passes today and tighten it from there.
+
 ### Configuration
 
 Two files, split by trust rather than by topic.
@@ -270,11 +293,22 @@ and nothing else:
 | `agents.<role>.effort` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | unset — inherits the session's |
 | `cost.currency` | 1 to 8 letters, such as `"USD"` or `"CNY"` | `"USD"` |
 | `cost.budget` | number > 0, in `cost.currency` | unset (no warning) |
+| `cost.stopAtBudget` | `true \| false` | `false` (the budget only warns) |
 | `cost.prices` | `{ "<model>" \| "*": { input, output, cacheRead, cacheWrite } }`, per million tokens | unset (no cost column) |
 | `cost.contextWindows` | `{ "<model>" \| "*": tokens }` | unset (no `ctx%` column) |
 | `harnesses.<name>.limitWaitMinutes` | integer 0 to 1440; 0 turns the wait off | `60` |
 
-The `cost` keys only feed the `usage` report and are allowed in either file. `cost.prices` and
+With `cost.stopAtBudget` on, `workflow` and `dispatch` first price what the current session's
+subagents have used (the session named by `CLAUDE_CODE_SESSION_ID`, as `usage --session` reports
+it) and start nothing (exit 1) once that has reached `cost.budget`. Teammates already running are not stopped.
+Only priced spend counts, and the main session's own tokens are not in the usage report, so the
+real total is higher than what is compared: set the budget below your limit. With unpriced
+models the stop comes later still; it needs `cost.budget`
+and at least one price, and refuses to run (exit 2) without them. If the session's usage cannot
+be read, or the session has started no subagent yet, the command says on stderr that the budget
+was not checked and goes on.
+
+The other `cost` keys only feed the `usage` report. All of them are allowed in either file. `cost.prices` and
 `cost.contextWindows` are objects, so they are hand-edited; all four prices of a model are
 required, because a missing cache price read as zero would understate the largest part of a
 fleet's tokens. A model with no price shows `?` and is left out of the total, which then says so.

@@ -15,7 +15,9 @@ import { captureEnvironment, validateEnvironmentRecipe } from './environment-pre
 import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities.mjs'
 import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
-import { renderUsage, annotateUsage } from './usage.mjs'
+import { planCheckPrompt } from './plan-check.mjs'
+import { reviewDepth, renderReviewDepth, DEPTH_LIMITS } from './review-depth.mjs'
+import { renderUsage, annotateUsage, budgetStop, budgetStopLines } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
 import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
@@ -24,7 +26,7 @@ import { composeBatchBrief, composeBrief } from './brief.mjs'
 import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses, protectedPaths } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
-  getKey, setKey, unsetKey, ensureGitignored, ConfigError,
+  getKey, setKey, unsetKey, ensureGitignored, ConfigError, assertBudgetStop,
   GATE_FILE, LOCAL_FILE, ROLES, EXPERIMENTAL_HARNESSES,
 } from './config.mjs'
 import * as configModule from './config.mjs'
@@ -163,7 +165,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|plan-check|review-depth|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--root <path>]
@@ -197,6 +199,8 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   usage    [--session <id>] [--json] [--root <path>]
   retro    --run <id> [--date <YYYY-MM-DD>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
+  plan-check --plan <path> [--root <path>]
+  review-depth [--base <branch>] [--json] [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--plan <path>] [--base <branch>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
@@ -523,6 +527,9 @@ export const REQUIRED = {
   // No required flags: it reads the manifest and the working tree, and belongs to no run.
   'preview-check': [],
   'plan-drift': ['run', 'plan'],
+  // Belong to no run: one reads a plan file, the other the working branch's diff.
+  'plan-check': ['plan'],
+  'review-depth': [],
   'environment-check': ['file'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
@@ -627,6 +634,8 @@ export const KNOWN_FLAGS = {
   'collect-reviews': ['run', 'phase'],
   'preview-check': [],
   'plan-drift': ['run', 'plan', 'base'],
+  'plan-check': ['plan'],
+  'review-depth': ['base', 'json'],
   'environment-check': ['file', 'execute'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
@@ -1056,6 +1065,17 @@ function formatPlanSectionError(err) {
     return 'plan defect: this plan has an Out of Scope section but no Destination.\n'
       + 'Out of scope means beyond the destination, so without one there is\n'
       + 'nothing to judge an entry against.'
+  }
+  // Document-level, like the missing Destination: no bullet to quote, and no plan text printed.
+  if (err.reason === 'missing-statement') {
+    return 'plan defect: this plan has an Out of Scope section but no Statement.\n'
+      + 'Gates and reviewers judge the work against the plan, so a boundary can only be\n'
+      + 'checked against the request. Add `## Statement` with the request as it was made.'
+  }
+  if (err.reason === 'missing-acceptance') {
+    return 'plan defect: this plan has an Out of Scope section but no Acceptance entry.\n'
+      + 'Add `## Acceptance` with what must be true of the finished work, taken from\n'
+      + 'the statement and not from the tasks.'
   }
   if (err.reason === 'missing-reason') {
     return `plan defect: ${err.message}.\n`
@@ -1615,6 +1635,55 @@ export async function completeEnforcementAnswer({ runId, taskId, planPath, baseB
 // named `main`, the heuristic silently prefers it, mergeBase(main, run) collapses onto the
 // run tip, and every downstream diff and commit range becomes vacuous. When both exist and
 // the caller did not disambiguate, refuse rather than guess.
+// The opt-in budget stop (`cost.stopAtBudget`), asked before a command starts teammates.
+// Returns the exit code to stop with, or null to go on.
+//
+// It prices the usage of THIS session's subagents, as `usage --session` does, from the harness's
+// transcript store. The session is the one the harness names in CLAUDE_CODE_SESSION_ID, never
+// "the newest session with a store": a session that has started no subagent yet has no store, so
+// the newest one is an EARLIER session, and its spend would refuse the first dispatch of every
+// session opened after a budget was reached.
+//
+// The store is internal to the harness and may be absent or moved, and a new session has none
+// until its first subagent, so a failure to read it does not halt a run: the command says the
+// budget was not checked and goes on. That notice goes to stderr, because `workflow` prints the
+// generated script on stdout and a notice there would be a syntax error in it. A switch that is
+// on with nothing to measure against is a configuration error and is refused (2), because going
+// on silently would leave the operator believing a stop is armed.
+//
+// Exported so the suite can put the read-failure and misconfiguration paths to it directly.
+export async function budgetRefusal(root, cost, io, env = process.env) {
+  if (cost?.stopAtBudget !== true) return null
+  try {
+    assertBudgetStop(cost)
+  } catch (err) {
+    if (!(err instanceof ConfigError)) throw err
+    io.out(err.message)
+    return 2
+  }
+  const note = (text) => (typeof io.err === 'function' ? io.err(text) : io.out(text))
+  const sessionId = env.CLAUDE_CODE_SESSION_ID
+  if (typeof sessionId !== 'string' || sessionId === '') {
+    note('budget not checked: CLAUDE_CODE_SESSION_ID is not set, so there is no session whose spend could be priced')
+    return null
+  }
+  let raw
+  try {
+    raw = await readSessionUsage({
+      projectsDir: path.join(env.CLAUDE_CONFIG_DIR || path.join(homedir(), '.claude'), 'projects'),
+      root,
+      sessionId,
+    })
+  } catch (err) {
+    note(`budget not checked: ${printable(err.message)}`)
+    return null
+  }
+  const stop = budgetStop(annotateUsage(raw, cost))
+  if (!stop) return null
+  for (const line of budgetStopLines(stop)) io.out(line)
+  return 1
+}
+
 async function resolveBaseBranch(git, flag) {
   if (flag) {
     // Checked HERE because every consumer splices the answer into `refs/heads/<name>`: a value
@@ -4585,6 +4654,9 @@ export async function runCli(argv, io = { out: console.log }) {
     const phase = Number(flags.phase)
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
+    // Before anything is generated: a workflow printed past the budget would be dispatched.
+    const overBudget = await budgetRefusal(root, resolved.cost, io)
+    if (overBudget !== null) return overBudget
 
     // Concrete model names never enter this repository or fleetmates.gate.json — they live
     // in the dispatching skill, which passes its own tier map through here. Absent, the
@@ -4770,6 +4842,9 @@ export async function runCli(argv, io = { out: console.log }) {
 
     const resolved = await resolveConfig(root, io)
     if (!resolved) return 2
+    // Before the harness is probed or a sandbox is cut: past the budget, nothing is started.
+    const overBudget = await budgetRefusal(root, resolved.cost, io)
+    if (overBudget !== null) return overBudget
 
     let adapter = prerequisites?.adapter ?? resolveHarness(flags, io)
     if (!adapter) return 2
@@ -6420,6 +6495,67 @@ export async function runCli(argv, io = { out: console.log }) {
         retro.markdown,
       ].join('\n'))
     }
+    return 0
+  }
+
+  if (command === 'plan-check') {
+    // The plan in the WORKING TREE, as `init-run` reads it: this runs before a run exists, on a
+    // plan that can still be corrected. It prints a prompt and does nothing else: no file is
+    // written and no reviewer is dispatched, so the orchestrator decides who reads it.
+    const planFile = path.resolve(root, String(flags.plan))
+    let planText
+    try {
+      planText = await readFile(planFile, 'utf8')
+    } catch (err) {
+      io.out(`plan-check: cannot read the plan: ${printable(err.message)}`)
+      return 2
+    }
+    let sections
+    try {
+      sections = parsePlanSections(planText)
+    } catch (err) {
+      io.out(planSectionsRefusal(err))
+      return 2
+    }
+    if (!sections.statement) {
+      io.out('plan-check: the plan has no Statement section, so there is nothing to compare it against.\n'
+        + 'Add `## Statement` with the request as it was made, and `## Acceptance` with what must be true of the finished work.')
+      return 2
+    }
+    io.out(printableBlock(JSON.stringify(planCheckPrompt({ planPath: String(flags.plan) }), null, 2)))
+    return 0
+  }
+
+  if (command === 'review-depth') {
+    // Exit 0 for every suggestion: this advises, and an exit code a script could branch on would
+    // make it a gate by another name. 2 is kept for an invocation it cannot answer at all.
+    const git = createGit({ cwd: root })
+    let stat
+    let sets
+    let prefix
+    try {
+      const base = await resolveBaseBranch(git, typeof flags.base === 'string' ? flags.base : undefined)
+      stat = await git.diffStat({ base, branch: 'HEAD' })
+      // The same 500-commit window a brief's blast radius is computed over.
+      sets = await git.commitFileSets({ limit: 500 })
+      prefix = await repoPrefix(root)
+    } catch (err) {
+      io.out(`review-depth: ${printable(err.message)}`)
+      return 2
+    }
+    // Both lists are already relative to the repository root: `git diff` and `git log` name
+    // paths from the top of the work tree whatever directory they run in.
+    const files = stat.files
+    // History names every path that ever existed. A neighbour that has since been deleted cannot
+    // be broken by this change, so only files still in the work tree count.
+    const top = path.resolve(root, ...prefix.split('/').filter(Boolean).map(() => '..'))
+    const present = async (file) => { try { await lstat(path.join(top, file)); return true } catch { return false } }
+    let coupled = 0
+    for (const n of neighboursOf(buildCoupling(sets), files, { top: Number.MAX_SAFE_INTEGER })) {
+      if (n.confidence >= DEPTH_LIMITS.coupledConfidence && await present(n.path)) coupled += 1
+    }
+    const result = reviewDepth({ files: files.length, lines: stat.lines, coupled })
+    io.out(flags.json === true ? JSON.stringify(result, null, 2) : renderReviewDepth(result))
     return 0
   }
 
