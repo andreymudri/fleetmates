@@ -16,6 +16,7 @@ import { validateRolePolicy, resolveRoleCapabilities } from './role-capabilities
 import { probeCapabilities } from './capability-preflight.mjs'
 import { bulletSection, parsePlanSections, PlanSectionError } from './plan-sections.mjs'
 import { planCheckPrompt } from './plan-check.mjs'
+import { reviewDepth, renderReviewDepth, DEPTH_LIMITS } from './review-depth.mjs'
 import { renderUsage, annotateUsage } from './usage.mjs'
 import { readSessionUsage } from './usage-store.mjs'
 import { homedir } from 'node:os'
@@ -6467,6 +6468,31 @@ export async function runCli(argv, io = { out: console.log }) {
       return 2
     }
     io.out(printableBlock(JSON.stringify(planCheckPrompt({ planPath: String(flags.plan) }), null, 2)))
+    return 0
+  }
+
+  if (command === 'review-depth') {
+    // Exit 0 for every suggestion: this advises, and an exit code a script could branch on would
+    // make it a gate by another name. 2 is kept for an invocation it cannot answer at all.
+    const git = createGit({ cwd: root })
+    let stat
+    let sets
+    try {
+      const base = await resolveBaseBranch(git, typeof flags.base === 'string' ? flags.base : undefined)
+      stat = await git.diffStat({ base, branch: 'HEAD' })
+      // The same 500-commit window a brief's blast radius is computed over.
+      sets = await git.commitFileSets({ limit: 500 })
+    } catch (err) {
+      io.out(`review-depth: ${printable(err.message)}`)
+      return 2
+    }
+    // Both lists are already relative to the repository root: `git diff` and `git log` name
+    // paths from the top of the work tree whatever directory they run in.
+    const files = stat.files
+    const coupled = neighboursOf(buildCoupling(sets), files, { top: Number.MAX_SAFE_INTEGER })
+      .filter((n) => n.confidence >= DEPTH_LIMITS.coupledConfidence).length
+    const result = reviewDepth({ files: files.length, lines: stat.lines, coupled })
+    io.out(flags.json === true ? JSON.stringify(result, null, 2) : renderReviewDepth(result))
     return 0
   }
 
