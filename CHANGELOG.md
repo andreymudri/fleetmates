@@ -7,6 +7,8 @@
 - A plan can state the request it was written from. `## Statement` holds the request and
   `## Acceptance` what must be true of the finished work. `plan-check --plan <path>` prints the
   prompt for one reviewer that reads the plan against them and reports what the plan leaves out.
+  The reviewer may read the code to see whether something an Out of Scope entry excludes is
+  needed.
   Gates and reviewers judge the work against the plan, so a plan that excluded something the
   request needed used to pass every gate. The run review now also judges the integrated diff
   against the Acceptance entries.
