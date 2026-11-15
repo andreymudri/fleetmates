@@ -88,16 +88,6 @@ What this route does not cover:
 - A review check scoped `phase` is not reviewed here: it keeps a review per phase, through the
   same commands with `--phase <n>`.
 
-## Static analysis is a command check
-
-When a project wants complexity, duplication or dead code watched, add the tool as a `command`
-check in `fleetmates.gate.json`, never as a reviewer lens:
-
-    { "name": "dead-code", "kind": "command", "run": "<the project's own tool>" }
-
-A tool gives the same answer on the same tree and costs no model call. The manifest is protected:
-propose the entry to the user, who adds it.
-
 ## Reporting rule
 
 **Never report a phase done without a recorded PASS in `status.json`.** A check that was
@@ -119,6 +109,6 @@ this because a check "obviously" passes is the same defect as skipping the check
 | A review in detail: reviewer tier and effort, findings files and stamps, `collect-reviews` refusals and exit codes, the `claims` lens keys, results keyed by phase for `finish` | `reference/review-results.md` |
 | A phase gate failed: `fix`, `retry`, `escalate`, the round budget, a `--no-fleet` gate | `reference/on-fail.md` |
 | The `merge` check: the preview, `preview.link`, a conflict | `reference/merge-preview.md` |
-| What `fileset` and `ownership` cover, protected paths, the test inventory | `reference/enforcement.md` |
+| What `fileset` and `ownership` cover, protected paths, the test inventory, static analysis as a `command` check | `reference/enforcement.md` |
 | `platformSim`, `flaky`, the quarantine file, the `portability` lens | `reference/platform-and-timing.md` |
 | The orchestrator is not Claude Code | `reference/other-harnesses.md` |

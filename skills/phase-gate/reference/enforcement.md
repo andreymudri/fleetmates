@@ -67,3 +67,13 @@ Skipped only when the caller passes `--no-fleet`. Missing state is a failure, ne
 
 A `fileset` or `ownership` failure is a process violation, not a code defect. Do not widen the
 plan's file set to make it pass.
+
+## Static analysis is a command check
+
+When a project wants complexity, duplication or dead code watched, add the tool as a `command`
+check in `fleetmates.gate.json`, never as a reviewer lens:
+
+    { "name": "dead-code", "kind": "command", "run": "<the project's own tool>" }
+
+A tool gives the same answer on the same tree and costs no model call. The manifest is protected:
+propose the entry to the user, who adds it.
