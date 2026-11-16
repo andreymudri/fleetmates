@@ -267,6 +267,12 @@ const CORE = {
       'Stop when no branch is open and the user confirms the ledger reads complete.',
       'is never a valid stop condition'],
   },
+  'writing-plans': {
+    // The headings inside the fenced plan examples are lines of the file too.
+    headings: ['Save location', 'Global Constraints', 'Global Constraints', 'Destination, fog, and out-of-scope', 'Destination', 'Not Yet Specified', 'Out of Scope', 'Statement', 'Acceptance', 'Machine-readable task format', 'Dependencies are mandatory where they exist', 'Declared files are the enforced write set', 'The example plan', 'Self-check before dispatch', 'Task right-sizing, bite-sized steps, no placeholders', 'Self-review', 'When to read a reference'],
+    sentences: ['**A plan with `## Out of Scope` must carry both**', 'Before execution, have one fresh reviewer read the plan against its statement:',
+      'An implementer may only create or modify the files its task declares.', 'only three file-line forms are recognised'],
+  },
   'using-fleetmates': {
     headings: ['The Rule', 'Skill Priority', 'Routing', 'Fleet or Solo', 'Red Flags', 'Invoking the CLI', 'Non-negotiables',
       'When to read a reference'],

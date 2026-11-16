@@ -90,37 +90,8 @@ reviewer and resolve its `high` findings in the plan before the first task start
 is fresh on purpose: the session that wrote the plan reads its own Out of Scope entry as the
 decision it remembers making.
 
-**The fog-or-task test**, and the rule the whole feature rests on — it turns on
-dispatchability, not sharpness:
-
-> Can you write it as a task — a declared file set, and acceptance criteria a green suite would
-> satisfy? If yes, it is a task, even when it is blocked and cannot be worked yet. If no, it is
-> Not Yet Specified, however sharply you can phrase the question.
-
-The consequence: do not pre-slice fog into task-shaped pieces. One fog entry may graduate into
-three tasks, or into none. A question can be perfectly sharp and still have nowhere to go —
-sharpness is not the test, dispatchability is.
-
-**The two entry rules, and what each is for:**
-
-- Every `## Out of Scope` entry needs a reason clause — a separator (em dash, en dash, spaced
-  hyphen, or spaced double hyphen) followed by at least one non-whitespace character. A reason
-  clause is what makes a boundary reviewable; an entry without one is a word, not a decision.
-- Every `## Not Yet Specified` entry must contain a `?` — anywhere in the entry, not necessarily
-  at the end, so the question can carry the context that makes it worth reading. A question mark
-  is what keeps fog from becoming a dumping ground for work nobody wanted to size.
-
-**What enforces these rules.** `init-run` parses the header sections from the plan in the working
-tree and refuses the run, with exit 2, on a malformed entry or a missing Destination, Statement
-or Acceptance. `rebuild-state` reads the plan at the anchor and, on the same defects, rebuilds
-the section fields as empty instead of refusing. The rules check shape — a separator is present,
-a `?` is present, a section has prose or an entry — not truth: whether a reason is a good one, or
-an acceptance entry really follows from the statement, is what `plan-check` and review are for.
-
-**An `## Out of Scope` entry does not answer a reviewer's finding.** A finding relocated there
-is still a finding, and moving it changes nothing about whether it is real. The mechanical rules
-cannot catch this: a well-formed entry with a plausible reason is exactly what silencing a
-finding would look like to a parser.
+What separates a Not Yet Specified entry from a task, the two entry rules, and what enforces
+the header sections are in `reference/header-sections.md`.
 
 ## Machine-readable task format
 
@@ -138,34 +109,8 @@ silently, and phase assignment (`scripts/phases.mjs`) reads an empty file list a
 nothing", landing the task in phase 1 beside everything else. Use the forms exactly, one file per
 bullet.
 
-### Protected paths
-
-A path the gate manifest protects — `fleetmates.gate.json` always, plus whatever its top-level
-`protected` array adds — may only be changed by a task whose file line carries the ` (protected)`
-modifier after the verb:
-
-- `- Modify (protected): \`fleetmates.gate.json\``
-
-Exact lower case only: `(Protected)` is refused like any other malformed file line. The modifier
-does not add a second file list: the path is declared in `files` like any other, and the marking
-only authorises the change. The gate reads the plan from the anchor commit, so a marking added
-mid-run counts only once it is amended on the base branch and the base is merged into the run
-branch (see `parallel-execution`, "Amending a
-plan mid-run"). A task that changes a protected path without the marking fails `fileset` and
-escalates, even when the path is declared.
-
-### Dropped tests
-
-When the gate's manifest gives a `command` check a `report`, the gate compares the suite's tests
-before and after the phase. A task that deletes a test, renames one, or makes one stop running must
-mark the test file with ` (drops)`:
-
-- `- Test (drops): \`tests/old-parse.test.mjs\``
-
-Exact lower case, read from the plan at the anchor like `(protected)`, and one modifier per line:
-a file that needs both markings goes on two lines. Without it the gate's inventory result fails and
-the phase escalates. A test that is skipped where the gate runs — no database, no GPU — is not a
-plan matter: it is declared in the manifest's `skips`, which is protected.
+A task that changes a path the gate protects, or that drops a test, marks the file line: see
+`reference/protected-and-dropped.md`.
 
 ## Dependencies are mandatory where they exist
 
@@ -176,17 +121,6 @@ parallel worktrees regardless of what the prose says.
 When a task has no dependencies, omit the **Depends:** line entirely — that is the intended
 way to say "nothing." A sentinel like `**Depends:** none` is tolerated by the parser, but
 omission is the documented form; don't rely on the sentinel.
-
-## Declaring a model tier
-
-A task may declare the model tier it should run at:
-
-    **Model:** cheap
-
-Valid values are `cheap`, `mid`, and `capable`. Omit the line and `init-run` infers a tier
-from the task's shape — how many other tasks depend on it, how many files it declares, and
-whether its brief already contains the code to write. Declare one only when you know the
-inference would be wrong; an unrecognised value fails `init-run` with the offending task id.
 
 ## Declared files are the enforced write set
 
@@ -249,3 +183,11 @@ Before handing the plan off, check:
   plan against its statement: gates and reviewers judge the work against the plan, so a plan that
   leaves out what the statement requires passes every gate. Do not do this check yourself in the
   reviewer's place: you are the reader who wrote the plan.
+
+## When to read a reference
+
+| Situation | Read |
+|---|---|
+| Writing Not Yet Specified or Out of Scope entries, or `init-run` refused a header section | `reference/header-sections.md` |
+| A task changes a protected path, or deletes, renames or stops running a test | `reference/protected-and-dropped.md` |
+| A task should run at a model tier other than the inferred one | `reference/model-tier.md` |

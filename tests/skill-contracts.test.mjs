@@ -2122,7 +2122,7 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
 // text alone could not reach is the smallest size that was reached, with the reason beside it.
 // Every skill that keeps part of its text in reference/ files. A capped skill that is not listed
 // here fits its cap whole.
-const SPLIT_SKILLS = ['grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates']
+const SPLIT_SKILLS = ['grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates', 'writing-plans']
 
 const CORE_CAPS = {
   // 6144 was the aim. The coverage sweep is walked in every interview, so it stays in the core.
@@ -2132,6 +2132,9 @@ const CORE_CAPS = {
   // The session start hook injects this file whole, inside a wrapper of 222 bytes, on every start,
   // resume, clear, compaction and fork: 4640 here keeps the injected text at most 4864 bytes.
   'using-fleetmates': 4640,
+  // 7168 was the aim. Every plan needs the header sections, the task format, the example and the
+  // self-check, and those alone are about 8 KB.
+  'writing-plans': 8448,
 }
 
 for (const [name, cap] of Object.entries(CORE_CAPS)) {
