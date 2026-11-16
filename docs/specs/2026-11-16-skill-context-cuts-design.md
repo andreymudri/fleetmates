@@ -85,6 +85,28 @@ This is the smallest saving of the four, and the only change here that rewords t
 on. If a description cannot be shortened without losing a trigger, it stays as it is and the cap
 lists it as an exception with the reason.
 
+## Caps as built
+
+Three caps were raised, because moving text alone did not reach them and the rest of each core
+is used every time the skill is.
+
+| Text | Cap in this design | Cap as built | Size as built | Reason |
+|---|---|---|---|---|
+| Session start, injected | 4 KB | 4864 | 4665 | Corrected above before work started |
+| `grilling` | 6144 | 6656 | 6582 | The coverage sweep is walked in every interview |
+| `writing-plans` | 7168 | 8448 | 8177 | Header sections, task format, example and self-check are needed by every plan |
+| `brainstorming` | 6144 | 6272 | 6184 | The rule that the only next skill is `writing-plans` stays in the core |
+| `finishing-a-development-branch` | 6144 | 6144 | 6132 | The Remote CI step and its two rules stay; its commands moved |
+| `fleet-supervision` | 8192 | 8192 | 7489 | |
+| `fleet-lifecycle` | 8192 | 8192 | 7355 | Not split: it already fits |
+
+A full inline feature flow loads 31.5 KB, against the 29.4 KB this design aimed for and 50.3 KB
+before.
+
+Two descriptions are over 160 characters. `using-fleetmates` (161) is the exact text
+`scripts/security-lint.mjs` approves as the one description allowed to claim every task.
+`grilling` (181) names four separate triggers.
+
 ## Testing
 
 - A size test for every core named above and for the hook's injected text, in the form of the
