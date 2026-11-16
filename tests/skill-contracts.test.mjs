@@ -2118,16 +2118,24 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
 // The point of the split is what an orchestrator re-reads on every call, so the bound is on the
 // core file alone, in bytes as it ships. It says nothing about how much of a reference a run ends
 // up reading, and nothing about the other skills, which are not split.
-const CORE_LIMIT_BYTES = 8 * 1024
+// Each cap is the size its core was cut to, so a core cannot grow back unnoticed. A cap that moving
+// text alone could not reach is the smallest size that was reached, with the reason beside it.
+// Every skill that keeps part of its text in reference/ files. A capped skill that is not listed
+// here fits its cap whole.
+const SPLIT_SKILLS = ['parallel-execution', 'phase-gate']
 
-test('the parallel-execution and phase-gate cores are each at most 8 KB', async () => {
-  for (const name of ['parallel-execution', 'phase-gate']) {
+const CORE_CAPS = {
+  'parallel-execution': 8 * 1024,
+  'phase-gate': 8 * 1024,
+}
+
+for (const [name, cap] of Object.entries(CORE_CAPS)) {
+  test(`the ${name} core is at most ${cap} bytes`, async () => {
     const { files } = await readSkill(name)
     const bytes = Buffer.byteLength(files[0].text, 'utf8')
-    assert.ok(bytes <= CORE_LIMIT_BYTES, `${name}/SKILL.md is ${bytes} bytes; the core must stay at most ${CORE_LIMIT_BYTES}`)
-    assert.ok(files.length > 1, `${name} must keep its rare sections in reference/ files`)
-  }
-})
+    assert.ok(bytes <= cap, `${name}/SKILL.md is ${bytes} bytes; the core must stay at most ${cap}`)
+  })
+}
 
 // A reference file no core names is never read, so whatever it holds is invisible at runtime while
 // every lock above still passes over it. Each core therefore ends with a table mapping a situation
@@ -2155,7 +2163,7 @@ test('every skill with reference files ends its core with a table naming each of
     })
     assert.deepEqual([...named].sort(), refs, `${name}: the closing table must name each reference file exactly once, and only files that exist`)
   }
-  assert.deepEqual(split, ['parallel-execution', 'phase-gate'], 'the skills split into a core and references')
+  assert.deepEqual(split, SPLIT_SKILLS, 'the skills split into a core and references')
 })
 
 test('parallel-execution, executing-plans and writing-plans each send the plan to one reviewer, and say why nothing else catches it', async () => {
