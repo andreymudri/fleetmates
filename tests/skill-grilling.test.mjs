@@ -1,11 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 
 // Whitespace is normalised once here, so an assertion pins words rather than the file's current
 // line wrap. Reflowing a paragraph must not turn this suite red with nothing semantic changed.
-const body = async () =>
-  (await readFile(new URL('../skills/grilling/SKILL.md', import.meta.url), 'utf8')).replace(/\s+/g, ' ')
+// The skill is its core plus its reference files, read as one text: a sentence pinned below stays
+// pinned wherever it lands. Which sections must be in the core itself is pinned in skills.test.mjs.
+const body = async () => {
+  const dir = new URL('../skills/grilling/', import.meta.url)
+  const refs = (await readdir(new URL('reference/', dir))).filter((f) => f.endsWith('.md')).sort()
+  const texts = await Promise.all(['SKILL.md', ...refs.map((f) => `reference/${f}`)].map((f) => readFile(new URL(f, dir), 'utf8')))
+  return texts.join('\n').replace(/\s+/g, ' ')
+}
 
 test('walks the design tree, parent decisions before the children that depend on them', async () => {
   const b = await body()

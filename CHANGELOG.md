@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Skills cost less context. Six skills are now a short core plus `reference/` files read on
+  demand, the form `parallel-execution` and `phase-gate` already had. Text was moved, not
+  reworded or removed. Sizes of `SKILL.md`, in bytes:
+
+  | Skill | Before | After |
+  |---|---|---|
+  | `using-fleetmates` (injected at every session start) | 6397 | 4443 |
+  | `grilling` | 11105 | 6582 |
+  | `writing-plans` | 11631 | 8177 |
+  | `brainstorming` | 8777 | 6184 |
+  | `finishing-a-development-branch` | 14401 | 6132 |
+  | `fleet-supervision` | 16041 | 7489 |
+
+  A feature worked inline (`brainstorming`, `grilling`, `writing-plans`, `executing-plans`,
+  `finishing-a-development-branch`) loads 31.5 KB of skill text, down from 50.3 KB. The session
+  start hook injects 4665 bytes, down from 6619. A test caps each core, so one cannot grow back
+  unnoticed.
+- The descriptions of `grilling`, `brainstorming` and `receiving-code-review` are shorter. Each
+  keeps its `Use when` clause. A test caps every description at 160 characters.
+
 ## v2.10.0
 
 ### Added

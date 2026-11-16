@@ -21,6 +21,25 @@ async function skill(name, options) {
   return { fields, body, doc }
 }
 
+// A description is in the skill list of every session, so its length is paid whether or not the
+// skill is used. An exception keeps its length for the reason beside it.
+const DESCRIPTION_CAP = 160
+const DESCRIPTION_EXCEPTIONS = {
+  // scripts/security-lint.mjs approves this exact text as the one description allowed to claim every task.
+  'using-fleetmates': 161,
+  // Four separate triggers; dropping one would stop the skill being chosen for it.
+  grilling: 181,
+}
+
+test(`each description is at most ${DESCRIPTION_CAP} characters, apart from the named exceptions`, async () => {
+  for (const name of await allSkills()) {
+    const { fields } = await skill(name)
+    const cap = DESCRIPTION_EXCEPTIONS[name] ?? DESCRIPTION_CAP
+    assert.ok(fields.description.length <= cap, `${name}: description is ${fields.description.length} characters; the cap is ${cap}`)
+  }
+  for (const name of Object.keys(DESCRIPTION_EXCEPTIONS)) assert.ok((await allSkills()).includes(name), `exception for missing skill ${name}`)
+})
+
 test('every required fleet skill is present', async () => {
   const names = await allSkills()
   for (const required of REQUIRED) assert.ok(names.includes(required), `missing skill ${required}`)
@@ -259,6 +278,42 @@ const CORE = {
       'After a phase returns', 'Before dispatching tm-integrator', 'Review the run', 'Read results, not diffs',
       'Invariants', 'When to read a reference'],
     sentences: ['never touches the main worktree', 'Phase N+1 does not start before phase N gets a PASS.'],
+  },
+  brainstorming: {
+    headings: ['Anti-Pattern: "This Is Too Simple To Need A Design"', 'Checklist', 'The Process', 'After the Design', 'When to read a reference'],
+    sentences: ['Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it.',
+      '**The terminal state is invoking `writing-plans`.**', 'Wait for the user\'s response.'],
+  },
+  'finishing-a-development-branch': {
+    headings: ['The completion gate', 'Branch taxonomy', 'Surface unresolved findings', 'Remote CI', 'Integration options',
+      'When to read a reference'],
+    sentences: ['Ask the user before pushing the run branch, unless ci.push is auto, in which case push without\nasking.',
+      'A red, pending or unreadable CI means the merge is not offered', 'that call is not yours to make\nsilently.'],
+  },
+  'fleet-supervision': {
+    headings: ['Digest', 'What the repository says', 'Evidence and progress reports', 'Event-driven, not polling', 'The heartbeat',
+      'The SubagentStop backstop', 'Failure handling', 'Scaling suggestions', 'When to read a reference'],
+    sentences: ['It reports; it does not act.'],
+  },
+  grilling: {
+    headings: ['When to use', 'The loop', 'The design tree', 'The shape of one turn', 'Fact-find rather than ask',
+      'The open-questions ledger', 'Coverage sweep', 'Stop condition', 'When to read a reference'],
+    sentences: ['**Ask with `AskUserQuestion`, never in prose.', 'two to four options, three by default',
+      'Stop when no branch is open and the user confirms the ledger reads complete.',
+      'is never a valid stop condition'],
+  },
+  'writing-plans': {
+    // The headings inside the fenced plan examples are lines of the file too.
+    headings: ['Save location', 'Global Constraints', 'Global Constraints', 'Destination, fog, and out-of-scope', 'Destination', 'Not Yet Specified', 'Out of Scope', 'Statement', 'Acceptance', 'Machine-readable task format', 'Dependencies are mandatory where they exist', 'Declared files are the enforced write set', 'The example plan', 'Self-check before dispatch', 'Task right-sizing, bite-sized steps, no placeholders', 'Self-review', 'When to read a reference'],
+    sentences: ['**A plan with `## Out of Scope` must carry both**', 'Before execution, have one fresh reviewer read the plan against its statement:',
+      'An implementer may only create or modify the files its task declares.', 'only three file-line forms are recognised'],
+  },
+  'using-fleetmates': {
+    headings: ['The Rule', 'Skill Priority', 'Routing', 'Fleet or Solo', 'Red Flags', 'Invoking the CLI', 'Non-negotiables',
+      'When to read a reference'],
+    sentences: ['**Invoke relevant skills BEFORE any response or action**', 'The plan has three or more tasks that touch disjoint files.',
+      '| "This is just a simple question" | Questions are tasks. Check for skills. |',
+      'Nothing is reported done without a recorded gate PASS.'],
   },
   'phase-gate': {
     headings: ['Run it', 'Agent and mcp checks', 'Review the run', 'Reporting rule', 'When to read a reference'],

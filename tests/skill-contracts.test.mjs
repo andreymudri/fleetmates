@@ -1677,7 +1677,7 @@ test('every sentence about the SubagentStop mechanism, in any document, is one a
 const HAND_SWEEP_LEXICON = /rm -rf|rm -fr|by hand|hand-run|hand sweep/i
 
 const HAND_SWEEP_CORPUS = [
-  "finishing-a-development-branch :: Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at.",
+  "finishing-a-development-branch/reference/cleanup.md :: Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at.",
   "parallel-execution/reference/cleanup-and-worktrees.md :: Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure \"merged\" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch.",
   "parallel-execution/reference/cleanup-and-worktrees.md :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
   "parallel-execution/reference/cleanup-and-worktrees.md :: Prune with the command rather than by hand:",
@@ -2118,16 +2118,38 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
 // The point of the split is what an orchestrator re-reads on every call, so the bound is on the
 // core file alone, in bytes as it ships. It says nothing about how much of a reference a run ends
 // up reading, and nothing about the other skills, which are not split.
-const CORE_LIMIT_BYTES = 8 * 1024
+// Each cap is the size its core was cut to, so a core cannot grow back unnoticed. A cap that moving
+// text alone could not reach is the smallest size that was reached, with the reason beside it.
+// Every skill that keeps part of its text in reference/ files. A capped skill that is not listed
+// here fits its cap whole.
+const SPLIT_SKILLS = ['brainstorming', 'finishing-a-development-branch', 'fleet-supervision', 'grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates', 'writing-plans']
 
-test('the parallel-execution and phase-gate cores are each at most 8 KB', async () => {
-  for (const name of ['parallel-execution', 'phase-gate']) {
+const CORE_CAPS = {
+  'finishing-a-development-branch': 6144,
+  // Whole: it has no reference files.
+  'fleet-lifecycle': 8 * 1024,
+  'fleet-supervision': 8 * 1024,
+  // 6144 was the aim; the rule that the only next skill is writing-plans stays in the core.
+  brainstorming: 6272,
+  // 6144 was the aim. The coverage sweep is walked in every interview, so it stays in the core.
+  grilling: 6656,
+  'parallel-execution': 8 * 1024,
+  'phase-gate': 8 * 1024,
+  // The session start hook injects this file whole, inside a wrapper of 222 bytes, on every start,
+  // resume, clear, compaction and fork: 4640 here keeps the injected text at most 4864 bytes.
+  'using-fleetmates': 4640,
+  // 7168 was the aim. Every plan needs the header sections, the task format, the example and the
+  // self-check, and those alone are about 8 KB.
+  'writing-plans': 8448,
+}
+
+for (const [name, cap] of Object.entries(CORE_CAPS)) {
+  test(`the ${name} core is at most ${cap} bytes`, async () => {
     const { files } = await readSkill(name)
     const bytes = Buffer.byteLength(files[0].text, 'utf8')
-    assert.ok(bytes <= CORE_LIMIT_BYTES, `${name}/SKILL.md is ${bytes} bytes; the core must stay at most ${CORE_LIMIT_BYTES}`)
-    assert.ok(files.length > 1, `${name} must keep its rare sections in reference/ files`)
-  }
-})
+    assert.ok(bytes <= cap, `${name}/SKILL.md is ${bytes} bytes; the core must stay at most ${cap}`)
+  })
+}
 
 // A reference file no core names is never read, so whatever it holds is invisible at runtime while
 // every lock above still passes over it. Each core therefore ends with a table mapping a situation
@@ -2155,7 +2177,7 @@ test('every skill with reference files ends its core with a table naming each of
     })
     assert.deepEqual([...named].sort(), refs, `${name}: the closing table must name each reference file exactly once, and only files that exist`)
   }
-  assert.deepEqual(split, ['parallel-execution', 'phase-gate'], 'the skills split into a core and references')
+  assert.deepEqual(split, SPLIT_SKILLS, 'the skills split into a core and references')
 })
 
 test('parallel-execution, executing-plans and writing-plans each send the plan to one reviewer, and say why nothing else catches it', async () => {

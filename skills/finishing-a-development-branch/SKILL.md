@@ -78,54 +78,6 @@ Two kinds of branch exist in this plugin, and they are not interchangeable:
 If you find yourself about to commit implementation work straight onto the run branch instead
 of a teammate branch, stop — that's the wrong direction for this model.
 
-## Worktree and branch cleanup
-
-A finished run leaves a worktree and a scratch branch per task. The `--yes` flag runs
-`git worktree remove --force` on every worktree it lists as prunable, and that discards
-uncommitted and untracked changes in it without asking. On Windows, it also follows a
-junction a worktree holds, so a worktree provisioned with a junction back into the
-repository — the kind a fresh worktree's own dependency install might use as a shortcut,
-such as a junction into the repository's real `node_modules` — has that target's
-contents deleted too, not just the worktree's own. Without `--yes` the command removes
-nothing, and it prints the worktrees and branches it would act on if nothing changes
-before the `--yes` run — both runs recompute the gate from scratch, but not which of
-those branches would actually be deleted — that verdict is computed only inside the
-removal itself. Run it first without `--yes` to read the plan, then add `--yes` to
-remove what it lists:
-
-    node "<fleetmates root>/scripts/cli.mjs" prune-run --run <runId> --plan <planPath> --root <project root> [--yes]
-
-It removes a task's worktree only where that task's phase gate recomputes to PASS, and
-it deletes the worktree's branch only where `git merge-base --is-ancestor` proves the
-run branch already contains it. That proof is against the ref `derive` takes directly
-off `git symbolic-ref --quiet HEAD`, not off an abbreviated name, and `derive` refuses
-to produce a run branch at all when HEAD is detached, when HEAD points outside
-`refs/heads/`, or when the name that ref strips to is itself a ref path — so nothing a
-teammate can plant under `refs/heads/` changes which ref this proof or the deletion it
-authorises runs against. That proof is not something a bare `git branch -D` makes on its own: `-D`
-deletes whatever branch it is given without asking whether the run branch contains it —
-it refuses only a branch a registered worktree still holds checked out, which is why
-`prune-run` removes the worktree first — and the plain `-d` measures "merged" against
-the branch's upstream or your current HEAD, never against the run branch. It never
-touches the main worktree, and it never removes another run's task worktree, but it does
-force-remove a leaked merge-preview worktree — a scratch worktree under the system temp
-directory — regardless of which run's gate created it, because a killed gate cannot run
-its own cleanup. Every worktree it examines and declines to remove is printed with the
-reason; it examines worktrees, not bare branches, so a task branch whose worktree is
-already gone is not reported either way.
-
-Do not sweep by hand: a hand-run `git worktree remove --force` or `git branch -D` supplies
-neither the recomputed phase gate nor the ancestry proof above — it only does what the flag
-itself says, on whatever you point it at.
-
-What this does not clean up: `.fleetmates/<run-id>/` stays on disk on purpose. Delete it
-yourself when you no longer want the record: `resume` reads it to continue a run, while
-`rebuild-state` reads it twice: once to refuse when it exists, since it exists for the
-case where the directory is already gone, and once to keep the run branch it recorded —
-delete the directory and a later `rebuild-state` run from any other checkout records that
-checkout as the run branch, permanently, and `complete --enforcement-only` can no longer
-verify completion for the rest of the run. It is gitignored.
-
 ## Surface unresolved findings
 
 Before proposing integration, check for parked or deferred findings from review — anything a
@@ -139,65 +91,12 @@ silently.
 A local gate runs on one machine, and the project's GitHub Actions may run on others. Do this
 step after every phase's gate has passed again and before presenting the integration options.
 
-Before any push, run on this machine the CI steps this machine can run, so the remote CI confirms
-rather than discovers:
-
-    node "<fleetmates root>/scripts/cli.mjs" ci-local --root <project root> [--dry-run] [--keep-home] [--no-platform-sim]
-
-It reads the workflows that run on a branch push or a pull request, takes each job whose
-`runs-on` (or `matrix.os` list) is this operating system, and runs that job's `run:` steps in
-order, with the step's shell, its `env`, its `working-directory`, and `GITHUB_ENV` and
-`GITHUB_PATH` carried to the next step. Each job runs in an environment shaped like a fresh
-hosted runner rather than this shell: an empty `HOME` and XDG directories (the toolchain
-directories of mise, asdf, volta, rustup, cargo, pyenv, nvm and bun, and the npm cache, stay
-visible), and the platform simulator's symlinked temp dir, `core.autocrlf=true` and `umask 077`,
-with the workflow's own `env` applied over them. A test that passes only because of this
-machine's own config, or only on a canonical temp path, fails here instead of on the runner.
-`--keep-home` and `--no-platform-sim` turn either off; with the user's own `HOME`, a
-`git config --global` step is undone after its step and the run names each file it restored. What it cannot reproduce it
-skips and names: a `uses:` action, an expression other than `matrix.os`, `runner.os` and
-`runner.temp`, an `if:` other than a `runner.os` comparison, an unusual shell, and every job for
-another operating system. Those are what the remote CI is still for. Exit 0 means every step it
-ran passed; exit 1 names the step that failed and nothing after it ran, so fix it before pushing,
-and do not push; exit 3 means no step runs on this machine, so say that the remote CI is the
-only check. `--dry-run` lists what would run and runs nothing.
+Before any push, run `ci-local`; after it, wait with `ci-wait`. Both commands, the two config keys
+and every exit code are in `reference/remote-ci.md`.
 
 Ask the user before pushing the run branch, unless ci.push is auto, in which case push without
 asking. The `ci-wait` command only reads; it never pushes, so the push is this step's own action. If the user
 declines the push, remote CI was not read: say so, and present the run as unverified by CI.
-
-Two config keys shape this step: `ci.push` is `ask` (the default) or `auto`, and
-`ci.waitMinutes` is an integer from 1 to 720, 60 by default. Set either through the CLI, in the
-tracked `fleetmates.gate.json` by default or with `--local` in the gitignored
-`fleetmates.local.json`; any other value is refused with exit 2. The `config list` command does not print
-them, so read one back with `config get`:
-
-    node "<fleetmates root>/scripts/cli.mjs" config set ci.push auto --root <project root> [--local]
-    node "<fleetmates root>/scripts/cli.mjs" config set ci.waitMinutes 30 --root <project root> [--local]
-    node "<fleetmates root>/scripts/cli.mjs" config get ci.push --root <project root>
-
-Then wait for the remote CI of the branch tip:
-
-    node "<fleetmates root>/scripts/cli.mjs" ci-wait --branch <run branch> --root <project root> [--minutes <1-720>]
-
-It reads the GitHub Actions workflow runs of the branch's tip commit through `gh api` every 30
-seconds, for up to `ci.waitMinutes` minutes (60 when unset), or `--minutes` when given. It judges
-whole workflow runs, not single jobs: every run on the tip must be completed with conclusion
-`success` or `skipped`, and any other conclusion, `neutral` included, is a failure. A re-run counts
-by its latest attempt. A run still queued or in progress is pending, and so is a tip on which no
-run has started yet. Whether the project has workflows at all is read from the tip commit's tree,
-not from the working tree.
-
-Its exit code is the answer:
-
-- `0`: every workflow run on the tip passed. It also exits `0`, printing `no CI workflows: skipped`,
-  when the tip commit has no `.github/workflows`; tell the user the project has no remote CI, so
-  this step was skipped.
-- `1`: a run failed. It prints each failed run with its conclusion and its link.
-- `3`: runs were still pending when the window closed. It prints them with their links.
-- `4`: remote CI could not be read: `gh` is not installed or not logged in, the response was not
-  readable, or the tip has more than 100 workflow runs.
-- `2`: a bad invocation, such as a branch that does not exist or a `--minutes` outside 1 to 720.
 
 A red, pending or unreadable CI means the merge is not offered: report what `ci-wait` printed,
 links included, and stop. Fix a failure on a task branch, re-run the gate, push and wait again.
@@ -225,29 +124,10 @@ With `ask`, present the choice and do not pick one unilaterally:
 
 Carry out whichever the user picks; don't default to merging in the absence of an answer.
 
-## Auto-merge
+## When to read a reference
 
-`land.autoMerge` is false by default and is read only from the tracked `fleetmates.gate.json`;
-`config set land.autoMerge true --local` is refused with exit 2. A repository opts in once:
-
-    node "<fleetmates root>/scripts/cli.mjs" config set land.autoMerge true --root <project root>
-
-Merge the pull request you just opened without asking only when every one of these holds:
-
-- `land.autoMerge` is true and `land.mode` is `pr`.
-- `ci-wait` exited `0` on the tip with at least one workflow run. A project with no remote CI
-  (`no CI workflows: skipped`) is never merged automatically.
-- No unresolved finding was surfaced in this run.
-- `merge-guard` exits `0`. It refuses, with exit `1`, a run branch that changes the gate manifest,
-  the flaky quarantine, any path in the base branch's `protected` list, or a CI workflow, because
-  a run that rewrites the rules it is judged by must not judge itself:
-
-      node "<fleetmates root>/scripts/cli.mjs" merge-guard --branch <run branch> --base <base branch> --root <project root>
-
-Then merge it:
-
-    gh pr merge <number> --merge
-
-If any condition fails, leave the pull request open and say in one line which one failed. Never
-pass `--admin` and never bypass a required review: auto-merge is the user's standing permission
-to skip their own click, not to skip the repository's rules.
+| Situation | Read |
+|---|---|
+| Running the Remote CI step: its commands, keys and exit codes | `reference/remote-ci.md` |
+| `land.autoMerge` is set, or the user asks for the pull request to merge by itself | `reference/auto-merge.md` |
+| Removing a finished run's worktrees and scratch branches | `reference/cleanup.md` |

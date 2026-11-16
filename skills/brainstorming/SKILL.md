@@ -1,6 +1,6 @@
 ---
 name: brainstorming
-description: Use when starting any creative work - creating features, building components, adding functionality, or modifying behavior. Explores intent and design before implementation.
+description: Use when starting any creative work - creating features, building components, adding functionality, or modifying behavior.
 ---
 
 # Brainstorming Ideas Into Designs
@@ -34,33 +34,6 @@ You MUST complete these in order:
 7. **User reviews written spec** — ask user to review the spec file before proceeding
 8. **Transition to implementation** — invoke the `writing-plans` skill to create an implementation plan
 
-## Process Flow
-
-```dot
-digraph brainstorming {
-    "Explore project context" [shape=box];
-    "Ask clarifying questions\n(grilling skill)" [shape=box];
-    "Propose 2-3 approaches" [shape=box];
-    "Present design sections" [shape=box];
-    "User approves design?" [shape=diamond];
-    "Write design doc" [shape=box];
-    "Spec self-review\n(fix inline)" [shape=box];
-    "User reviews spec?" [shape=diamond];
-    "Invoke writing-plans skill" [shape=doublecircle];
-
-    "Explore project context" -> "Ask clarifying questions\n(grilling skill)";
-    "Ask clarifying questions\n(grilling skill)" -> "Propose 2-3 approaches" [label="ledger resolved"];
-    "Propose 2-3 approaches" -> "Present design sections";
-    "Present design sections" -> "User approves design?";
-    "User approves design?" -> "Present design sections" [label="no, revise"];
-    "User approves design?" -> "Write design doc" [label="yes"];
-    "Write design doc" -> "Spec self-review\n(fix inline)";
-    "Spec self-review\n(fix inline)" -> "User reviews spec?";
-    "User reviews spec?" -> "Write design doc" [label="changes requested"];
-    "User reviews spec?" -> "Invoke writing-plans skill" [label="approved"];
-}
-```
-
 **The terminal state is invoking `writing-plans`.** Once the design is approved, do NOT invoke any other implementation skill: the ONLY skill you invoke after the design is `writing-plans`. The one skill invoked before then is `grilling`, which runs step 2's question phase and hands its ledger back here — it is part of this process, not a transition out of it.
 
 ## The Process
@@ -68,8 +41,7 @@ digraph brainstorming {
 **Understanding the idea:**
 
 - Check out the current project state first (files, docs, recent commits)
-- Before asking detailed questions, assess scope: if the request describes multiple independent subsystems (e.g., "build a platform with chat, file storage, billing, and analytics"), flag this immediately. Don't spend questions refining details of a project that needs to be decomposed first.
-- If the project is too large for a single spec, help the user decompose into sub-projects: what are the independent pieces, how do they relate, what order should they be built? Then brainstorm the first sub-project through the normal design flow. Each sub-project gets its own spec → plan → implementation cycle.
+- Before asking detailed questions, assess scope. A request that describes several independent subsystems is decomposed first: see `reference/design-guidance.md`.
 - For appropriately-scoped projects, invoke the `grilling` skill and run the question phase there: questions in rounds of **up to four at a time**, never batching a question with one it depends on, walked as a design tree, each carrying your recommended answer, with an open-questions ledger
 - `grilling` governs the form of those questions — asked in rounds of up to four with declared options, never as prose. Do not run a second, looser question phase here
 - Focus on understanding: purpose, constraints, success criteria
@@ -89,19 +61,6 @@ digraph brainstorming {
 - Ask after each section whether it looks right so far
 - Cover: architecture, components, data flow, error handling, testing
 - Be ready to go back and clarify if something doesn't make sense
-
-**Design for isolation and clarity:**
-
-- Break the system into smaller units that each have one clear purpose, communicate through well-defined interfaces, and can be understood and tested independently
-- For each unit, you should be able to answer: what does it do, how do you use it, and what does it depend on?
-- Can someone understand what a unit does without reading its internals? Can you change the internals without breaking consumers? If not, the boundaries need work.
-- Smaller, well-bounded units are also easier for you to work with - you reason better about code you can hold in context at once, and your edits are more reliable when files are focused. When a file grows large, that's often a signal that it's doing too much.
-
-**Working in existing codebases:**
-
-- Explore the current structure before proposing changes. Follow existing patterns.
-- Where existing code has problems that affect the work (e.g., a file that's grown too large, unclear boundaries, tangled responsibilities), include targeted improvements as part of the design - the way a good developer improves code they're working in.
-- Don't propose unrelated refactoring. Stay focused on what serves the current goal.
 
 ## After the Design
 
@@ -133,3 +92,10 @@ Wait for the user's response. If they request changes, make them and re-run the 
 
 - Invoke the `writing-plans` skill to create a detailed implementation plan
 - Do NOT invoke any other skill at this point. `writing-plans` is the next step. (`grilling` belongs earlier, at step 2, not here.)
+
+## When to read a reference
+
+| Situation | Read |
+|---|---|
+| The request is too large for one spec, or the design has unit boundaries to draw or existing code to fit | `reference/design-guidance.md` |
+| The order of the steps, or which step loops back, is unclear | `reference/process-flow.md` |

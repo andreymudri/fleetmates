@@ -74,8 +74,11 @@ test('keeps the fleet invariants', async () => {
 })
 
 // fleet.mode (scripts/config.mjs): auto starts an eligible plan as a fleet without the question.
+// The policy and the presentation of the choice are read only when a fleet is eligible, so they
+// live in a reference file and the core says when to read it.
 test('the fleet policy reads fleet.mode before asking, and auto skips the question', async () => {
-  const b = await body()
+  assert.match(await body(), /When all of them hold, read `<fleetmates root>\/skills\/using-fleetmates\/reference\/fleet-or-solo\.md`/)
+  const b = await readFile(new URL('using-fleetmates/reference/fleet-or-solo.md', skillsDir), 'utf8')
   const policy = b.indexOf('### The fleet policy')
   const choice = b.indexOf('### Presenting the choice')
   assert.ok(policy !== -1 && policy < choice, 'the fleet policy must come before the choice')
