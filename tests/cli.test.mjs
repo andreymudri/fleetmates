@@ -8202,7 +8202,7 @@ test('workflow with a plan carrying Global Constraints puts every constraint in 
   })
 })
 
-test('workflow puts the plan's Destination and Statement in the brief of every teammate', async () => {
+test('workflow puts the Destination and Statement of the plan in the brief of every teammate', async () => {
   await withRepo(async ({ root, planPath, io, lines, git }) => {
     await writeFile(planPath, `## Destination\n\nThe report shows cost per agent.\n\n## Statement\n\nShow cost per agent.\n\n${PLAN}`, 'utf8')
     git(['add', '.'])
