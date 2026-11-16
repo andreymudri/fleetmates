@@ -2122,9 +2122,11 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
 // text alone could not reach is the smallest size that was reached, with the reason beside it.
 // Every skill that keeps part of its text in reference/ files. A capped skill that is not listed
 // here fits its cap whole.
-const SPLIT_SKILLS = ['parallel-execution', 'phase-gate', 'using-fleetmates']
+const SPLIT_SKILLS = ['grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates']
 
 const CORE_CAPS = {
+  // 6144 was the aim. The coverage sweep is walked in every interview, so it stays in the core.
+  grilling: 6656,
   'parallel-execution': 8 * 1024,
   'phase-gate': 8 * 1024,
   // The session start hook injects this file whole, inside a wrapper of 222 bytes, on every start,

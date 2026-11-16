@@ -260,6 +260,13 @@ const CORE = {
       'Invariants', 'When to read a reference'],
     sentences: ['never touches the main worktree', 'Phase N+1 does not start before phase N gets a PASS.'],
   },
+  grilling: {
+    headings: ['When to use', 'The loop', 'The design tree', 'The shape of one turn', 'Fact-find rather than ask',
+      'The open-questions ledger', 'Coverage sweep', 'Stop condition', 'When to read a reference'],
+    sentences: ['**Ask with `AskUserQuestion`, never in prose.', 'two to four options, three by default',
+      'Stop when no branch is open and the user confirms the ledger reads complete.',
+      'is never a valid stop condition'],
+  },
   'using-fleetmates': {
     headings: ['The Rule', 'Skill Priority', 'Routing', 'Fleet or Solo', 'Red Flags', 'Invoking the CLI', 'Non-negotiables',
       'When to read a reference'],
