@@ -22,11 +22,13 @@ Two findings, both from comparing fleetmates with another agent orchestrator and
 
 - Every implementer brief, full and terse, carries the plan's Destination and Statement when the
   plan has them. They are read from the plan at the anchor commit, like the rest of the brief.
-- They travel in the context bundle, which already passes plan text as JSON data. The Statement is
-  the request verbatim and must reach the teammate as data, never as instructions.
-- The bundle labels them as context for understanding the task. They add no scope: the declared
-  file set stays the only write set, and the bundle says so.
-- A Statement longer than 2000 characters is cut there, and the bundle names the plan path where
+- They travel as one line of JSON under a fixed sentence, a block of their own beside the context
+  bundle. The Statement is the request verbatim and must reach the teammate as data, never as
+  instructions. (As built. The first draft put them inside the context bundle; a bundle belongs to
+  one task and has an identity hash, so a batch could not carry them once.)
+- The fixed sentence says they are context for understanding the task and add no scope: the
+  declared file set stays the only write set.
+- A Statement longer than 2000 characters is cut there, and the block names the plan file where
   the rest can be read.
 - A batch brief carries them once, not once per task.
 - A plan without these sections produces the brief it produces today, byte for byte.

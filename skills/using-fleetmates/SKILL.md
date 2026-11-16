@@ -49,6 +49,7 @@ A fleet is **eligible** when all of these hold:
 - There is a written plan (or one can be written first).
 - The plan has three or more tasks that touch disjoint files.
 - The repo is a git repo — worktree isolation depends on it.
+- Each task is a real boundary: parallel output, a real prerequisite, or independent review.
 
 If any fails, take the inline path (`executing-plans`) and say why in one line. A two-task
 change costs more to orchestrate as a fleet than to just do.

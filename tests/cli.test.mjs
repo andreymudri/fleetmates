@@ -8202,6 +8202,28 @@ test('workflow with a plan carrying Global Constraints puts every constraint in 
   })
 })
 
+test('workflow puts the Destination and Statement of the plan in the brief of every teammate', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git }) => {
+    await writeFile(planPath, `## Destination\n\nThe report shows cost per agent.\n\n## Statement\n\nShow cost per agent.\n\n${PLAN}`, 'utf8')
+    git(['add', '.'])
+    git(['commit', '--quiet', '-m', 'plan with a statement'])
+    git(['branch', '--force', 'main', 'HEAD'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath], io), 0, lines.join('\n'))
+    const prompts = await captureAgentPrompts(lines.join('\n'))
+    assert.ok(prompts.length > 0, 'the workflow dispatches at least one teammate')
+    for (const prompt of prompts) {
+      const out = prompt.split('\n')
+      const data = out.findIndex((line) => line.startsWith('PLAN REQUEST CONTEXT.')) + 1
+      assert.notEqual(data, 0, 'the brief names the plan request context')
+      const context = JSON.parse(out[data])
+      assert.equal(context.destination, 'The report shows cost per agent.')
+      assert.equal(context.statement, 'Show cost per agent.')
+    }
+  })
+})
+
 // The brief is generated from the plan at the anchor, never from the checked-out copy. Both
 // `gate` and `complete` already read it that way, so that a teammate cannot widen its own
 // declared file set by editing the working tree. Reading it from disk here left the two
@@ -13212,6 +13234,31 @@ test('brief carries the constraints committed at the anchor, not the ones in the
     assert.equal(code, 0, lines.join('\n'))
     assert.match(lines.join('\n'), /- committed rule/)
     assert.doesNotMatch(lines.join('\n'), /forged rule/)
+  })
+})
+
+test('brief carries the Destination and Statement of the plan committed at the anchor', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const committed = path.join(root, 'plan3.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(committed, `## Destination\n\nThe report shows cost per agent.\n\n## Statement\n\nShow cost per agent.\n\n${PLAN}`, 'utf8')
+    g(['add', 'plan3.md'])
+    g(['commit', '--quiet', '-m', 'plan3'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', '--ff-only', 'main'])
+    await runCli(['init-run', committed, '--run', 'r1', '--root', root], io)
+    // Widened in the working tree after the commit: a brief built from disk would carry it.
+    await writeFile(committed, `## Destination\n\nForged.\n\n## Statement\n\nForged request.\n\n${PLAN}`, 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan3.md', '--base', 'main', '--root', root], io), 0, lines.join('\n'))
+    const out = lines.join('\n').split('\n')
+    const data = out.findIndex((line) => line.startsWith('PLAN REQUEST CONTEXT.')) + 1
+    assert.notEqual(data, 0, 'the brief names the plan request context')
+    assert.deepEqual(JSON.parse(out[data]), { source: 'plan3.md', destination: 'The report shows cost per agent.', statement: 'Show cost per agent.', statementTruncated: false })
+    // A plan with neither section: the brief does not mention the context at all.
+    lines.length = 0
+    assert.equal(await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--base', 'main', '--root', root], io), 0, lines.join('\n'))
+    assert.doesNotMatch(lines.join('\n'), /PLAN REQUEST CONTEXT/)
   })
 })
 

@@ -997,3 +997,17 @@ test('a batched script carries a task title verbatim and cannot be injected thro
     delete globalThis.PWNED
   }
 })
+
+// The plan request context reaches the briefs a Workflow script embeds, on both shapes of script
+// (docs/specs/2026-11-16-brief-context-and-split-rule-design.md, section 1).
+test('the plan request context is embedded in every brief, once per batch, and absent without one', async () => {
+  const { batchTasks } = await import('../scripts/workflow-gen.mjs')
+  const requestContext = { source: 'p.md', destination: 'Ship it.', statement: 'Do it.', statementTruncated: false }
+  const count = (src) => src.split('PLAN REQUEST CONTEXT.').length - 1
+  const base = { runId: '3f2a', phase: 1, tasks, maxParallel: 4 }
+  assert.equal(count(await generatePhaseWorkflow(base)), 0)
+  assert.equal(count(await generatePhaseWorkflow({ ...base, requestContext })), tasks.length, 'one per task brief')
+  const batched = await generatePhaseWorkflow({ ...base, requestContext, batchSize: tasks.length })
+  assert.equal(count(batched), batchTasks(tasks, tasks.length).length, 'one per batch brief')
+  assert.equal(count(await generatePhaseWorkflow({ ...base, batchSize: tasks.length })), 0)
+})

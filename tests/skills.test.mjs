@@ -306,12 +306,14 @@ const CORE = {
     // The headings inside the fenced plan examples are lines of the file too.
     headings: ['Save location', 'Global Constraints', 'Global Constraints', 'Destination, fog, and out-of-scope', 'Destination', 'Not Yet Specified', 'Out of Scope', 'Statement', 'Acceptance', 'Machine-readable task format', 'Dependencies are mandatory where they exist', 'Declared files are the enforced write set', 'The example plan', 'Self-check before dispatch', 'Task right-sizing, bite-sized steps, no placeholders', 'Self-review', 'When to read a reference'],
     sentences: ['**A plan with `## Out of Scope` must carry both**', 'Before execution, have one fresh reviewer read the plan against its statement:',
-      'An implementer may only create or modify the files its task declares.', 'only three file-line forms are recognised'],
+      'An implementer may only create or modify the files its task declares.', 'only three file-line forms are recognised',
+      'A plan\'s steps, files and phases do not each need a task.', 'split a task off only at a real boundary'],
   },
   'using-fleetmates': {
     headings: ['The Rule', 'Skill Priority', 'Routing', 'Fleet or Solo', 'Red Flags', 'Invoking the CLI', 'Non-negotiables',
       'When to read a reference'],
     sentences: ['**Invoke relevant skills BEFORE any response or action**', 'The plan has three or more tasks that touch disjoint files.',
+      'Each task is a real boundary: parallel output, a real prerequisite, or independent review.',
       '| "This is just a simple question" | Questions are tasks. Check for skills. |',
       'Nothing is reported done without a recorded gate PASS.'],
   },

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { selectPlanContracts } from '../scripts/plan-context.mjs'
+import { STATEMENT_LIMIT, planRequestContext, selectPlanContracts } from '../scripts/plan-context.mjs'
 const markdown = '### Task 1: Interface\n\n**Files:**\n- Create: `src/api.mjs`\n\nReturn an empty body on 204.\n\n### Task 2: Consumer\n\n**Depends:** T1\n**Files:**\n- Create: `src/client.mjs`\n\n**Acceptance:**\nDo not parse JSON on 204.\n\n```md\n### Task 9: not a real task\n## ignored heading\n```\n\n### Task 3: Unrelated\n\n**Files:**\n- Create: `other.mjs`\n'
 test('anchored acceptance and explicit dependencies preserve whole contracts and exact provenance', () => {
   const items = selectPlanContracts(markdown, 'plan.md', { id: 'T2', deps: ['T3'] })
@@ -90,4 +90,44 @@ test('review dispatch resolves anchored contracts on an explicit feature base in
   assert.match(prompt, /Return an empty body on 204/)
   assert.equal(await runCli(['dispatch-reviews', '--run', 'r1', '--phase', '2', '--harness', 'codex', '--plan', 'plan.md', '--base', 'missing-feature-base', '--root', root], io), 4)
   assert.match(output.at(-1), /not a local branch/)
+})
+
+// The plan request context: Destination and Statement for every implementer brief
+// (docs/specs/2026-11-16-brief-context-and-split-rule-design.md, section 1).
+const requestPlan = (statement) => `## Destination\n\nThe report shows cost per agent.\n\n## Statement\n\n${statement}\n\n### Task 1: a\n`
+
+test('planRequestContext carries the Destination and the Statement, and names the plan', () => {
+  assert.deepEqual(planRequestContext(requestPlan('Show cost per agent,\nand warn past the budget.'), 'docs/plans/p.md'), {
+    source: 'docs/plans/p.md',
+    destination: 'The report shows cost per agent.',
+    statement: 'Show cost per agent, and warn past the budget.',
+    statementTruncated: false,
+  })
+})
+
+test('planRequestContext is null for a plan with neither section, and keeps the one a plan has', () => {
+  assert.equal(planRequestContext('## Global Constraints\n\n- Node >= 24\n\n### Task 1: a\n', 'p.md'), null)
+  // An empty heading is an absent section: there is nothing to tell the teammate.
+  assert.equal(planRequestContext('## Destination\n\n## Statement\n\n### Task 1: a\n', 'p.md'), null)
+  assert.deepEqual(planRequestContext('## Destination\n\nShip it.\n\n### Task 1: a\n', 'p.md'),
+    { source: 'p.md', destination: 'Ship it.', statement: null, statementTruncated: false })
+  assert.deepEqual(planRequestContext('## Statement\n\nDo it.\n\n### Task 1: a\n', 'p.md'),
+    { source: 'p.md', destination: null, statement: 'Do it.', statementTruncated: false })
+})
+
+test('planRequestContext cuts a Statement past the limit, and not one at the limit', () => {
+  const atLimit = planRequestContext(requestPlan('x'.repeat(STATEMENT_LIMIT)), 'p.md')
+  assert.equal(atLimit.statement.length, STATEMENT_LIMIT)
+  assert.equal(atLimit.statementTruncated, false)
+  const over = planRequestContext(requestPlan('x'.repeat(STATEMENT_LIMIT) + 'y'), 'p.md')
+  assert.equal(over.statement, 'x'.repeat(STATEMENT_LIMIT))
+  assert.equal(over.statementTruncated, true)
+  assert.equal(STATEMENT_LIMIT, 2000)
+})
+
+test('planRequestContext counts code points, so the cut never splits a surrogate pair', () => {
+  const over = planRequestContext(requestPlan('x'.repeat(STATEMENT_LIMIT - 1) + '\u{1F600}' + 'tail'), 'p.md')
+  assert.equal(over.statementTruncated, true)
+  assert.ok(over.statement.endsWith('\u{1F600}'), 'the last kept character is the whole emoji')
+  assert.equal([...over.statement].length, STATEMENT_LIMIT)
 })

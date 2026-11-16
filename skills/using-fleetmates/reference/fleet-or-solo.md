@@ -2,6 +2,19 @@
 
 Read this when a fleet is eligible, as `using-fleetmates` defines it.
 
+### A real boundary
+
+The fourth eligibility condition. A plan's steps, files and phases do not each need a task: one
+owner end to end is the default. A task is a real boundary when it is one of:
+
+- **Independent parallel output.** It can be built and verified without waiting for the result of
+  another task.
+- **A real prerequisite.** Another task cannot start until it lands.
+- **Independent review.** Its result has to be judged by a reader who did not write it.
+
+A plan whose tasks are slices of one piece of work fails this condition, however many files it
+touches. Take the inline path and say why in one line.
+
 ### The fleet policy
 
 When a fleet is eligible, read the `fleet.mode` key first:

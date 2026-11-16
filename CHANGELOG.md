@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- A teammate's brief carries the plan's `## Destination` and `## Statement`, so an implementer
+  sees the request and not only its task. They arrive as one line of JSON under a fixed sentence
+  that says they add no scope. A Statement over 2000 characters is cut and the brief names the
+  plan file. A batch brief carries them once. A plan without these sections gets the brief it
+  got before.
+- A fourth condition for a fleet: each task is a real boundary, which is independent parallel
+  output, a real prerequisite, or independent review. `writing-plans` says a plan's steps, files
+  and phases do not each need a task.
+
 ### Changed
 
 - Skills cost less context. Six skills are now a short core plus `reference/` files read on

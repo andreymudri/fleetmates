@@ -23,6 +23,7 @@ import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBatchBrief, composeBrief } from './brief.mjs'
+import { planRequestContext } from './plan-context.mjs'
 import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses, protectedPaths } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
@@ -4616,10 +4617,12 @@ export async function runCli(argv, io = { out: console.log }) {
     let contextBundles
     try { contextBundles = await learningBundles({ ...contextAnchor, tasks: batch }) }
     catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+    const requestContext = planRequestContext(planMarkdown, planPath)
     if (batch.length > 1) {
       io.out(composeBatchBrief({
         tasks: batch.map((t) => ({ ...t, branch: taskBranchName(runId, t.id) })),
         contextBundles,
+        requestContext,
         runId,
         planPath,
         baseBranch,
@@ -4635,6 +4638,7 @@ export async function runCli(argv, io = { out: console.log }) {
       // nothing looks for.
       task: { ...task, branch: taskBranchName(runId, task.id) },
       contextBundle: contextBundles[task.id] ?? null,
+      requestContext,
       runId,
       planPath,
       baseBranch,
@@ -4761,6 +4765,7 @@ export async function runCli(argv, io = { out: console.log }) {
     catch (error) { io.err(JSON.stringify({ error: error.message })); return 2 }
     const src = await generatePhaseWorkflow({
       contextBundles,
+      requestContext: planRequestContext(planMarkdown, planPath),
       runId,
       phase,
       tasks: phaseTasks,
@@ -4885,6 +4890,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const composeBriefFor = (task) => composeBrief({
       task: { ...task, branch: taskBranchName(runId, task.id) },
       contextBundle: contextBundles[task.id] ?? null,
+      requestContext: planRequestContext(planMarkdown, planPath),
       runId, planPath, baseBranch, constraints, caveman: resolved.caveman, fixRound: fixRoundTasks !== null,
     })
 

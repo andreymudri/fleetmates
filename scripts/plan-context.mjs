@@ -1,4 +1,5 @@
 import { parsePlan } from './plan-parser.mjs'
+import { proseSection } from './plan-sections.mjs'
 
 // Use the plan's existing task/dependency grammar. Co-change history is not a contract.
 export function selectPlanContracts(markdown, source, task) {
@@ -40,4 +41,26 @@ export function selectPlanContracts(markdown, source, task) {
     if (!range) throw new Error('Plan context provenance is unavailable')
     return { id: `plan-contract-${id}`, source, ...range, text: lines.slice(range.startLine - 1, range.endLine).join('\n'), mandatory: true, reason }
   })
+}
+
+// The longest Statement a brief carries, in characters. A request with a pasted document would
+// otherwise be repeated in the brief of every teammate.
+export const STATEMENT_LIMIT = 2000
+
+// What the whole plan is for: its Destination and the request it was written from. A brief names
+// one task; without this an implementer judges its work against the plan author's reading of the
+// request and never sees the request. Read with `proseSection` and not `parsePlanSections`, so a
+// defect in another header section does not take this away: `init-run` already refuses that plan,
+// and a brief is not where it is reported.
+//
+// Returns null for a plan with neither section, so its brief is the brief it had before.
+export function planRequestContext(markdown, source) {
+  if (typeof markdown !== 'string' || typeof source !== 'string') return null
+  const destination = proseSection(markdown, 'Destination') || null
+  const whole = proseSection(markdown, 'Statement') || null
+  if (!destination && !whole) return null
+  // Code points, so the cut never leaves half of a surrogate pair.
+  const points = whole === null ? [] : [...whole]
+  const statementTruncated = points.length > STATEMENT_LIMIT
+  return { source, destination, statement: statementTruncated ? points.slice(0, STATEMENT_LIMIT).join('') : whole, statementTruncated }
 }

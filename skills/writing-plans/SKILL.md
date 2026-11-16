@@ -170,6 +170,10 @@ can finish it without touching another task's files. Each step is one action. Co
 actual code, not a description of code. Never write "TBD" or "similar to Task N" — write out
 the content, even if it repeats a pattern from an earlier task.
 
+A plan's steps, files and phases do not each need a task. One owner end to end is the default;
+split a task off only at a real boundary: independent parallel output, a real prerequisite of
+another task, or work that needs an independent review.
+
 ## Self-review
 
 Before handing the plan off, check:

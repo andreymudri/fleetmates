@@ -86,3 +86,19 @@ test('the fleet policy reads fleet.mode before asking, and auto skips the questi
   assert.match(b, /`fleet\.mode` is `ask` \(the default\) or `auto`\. With `auto`, run the plan through `init-run`,\s+show the phase breakdown in one short message, and start the fleet without asking\./)
   assert.match(b, /When a fleet \*\*is\*\* eligible and `fleet\.mode` is `ask`, never ask in prose\./)
 })
+
+// The fourth eligibility condition (docs/specs/2026-11-16-brief-context-and-split-rule-design.md,
+// section 2): three tasks on disjoint files are not enough when they are slices of one piece of work.
+test('a fleet is eligible only when each task is a real boundary, and the reference says what one is', async () => {
+  const core = await body()
+  const eligible = core.split(/^## Fleet or Solo$/m)[1].split(/^## /m)[0]
+  const conditions = eligible.split('\n').filter((line) => line.startsWith('- '))
+  assert.equal(conditions.length, 4, 'four eligibility conditions')
+  assert.equal(conditions[3], '- Each task is a real boundary: parallel output, a real prerequisite, or independent review.')
+  const reference = await readFile(new URL('using-fleetmates/reference/fleet-or-solo.md', skillsDir), 'utf8')
+  const section = reference.split(/^### A real boundary$/m)[1]?.split(/^### /m)[0]
+  assert.ok(section, 'the reference has no ### A real boundary section')
+  for (const name of ['Independent parallel output.', 'A real prerequisite.', 'Independent review.']) assert.ok(section.includes(`**${name}**`), `missing boundary: ${name}`)
+  assert.match(section, /A plan's steps, files and phases do not each need a task: one\s+owner end to end is the default\./)
+  assert.match(section, /fails this condition, however many files it\s+touches\. Take the inline path/)
+})
