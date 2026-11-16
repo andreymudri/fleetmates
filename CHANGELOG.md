@@ -4,6 +4,21 @@
 
 ### Added
 
+- Tickets: a backlog that outlives a session, and an advisory claim per ticket so that sessions
+  working in one repository can see what another has taken. `ticket add`, `list`, `show`, `note`,
+  `edit`, `claim`, `release`, `close`, `reopen`, `link` and `unlink`. Tickets live in
+  `.fleetmates/tickets.db` in the main checkout, shared by every worktree, in SQLite through
+  Node's built-in `node:sqlite`; no dependency is added.
+  - A claim never expires. `ticket list` shows each holder and the age of its claim, and
+    `ticket claim <id> --take` records a takeover.
+  - A ticket may wait for another. A prerequisite closed as dropped keeps blocking until it is
+    unlinked.
+  - `init-run --ticket <id>` claims the ticket for the run and refuses, before writing any run
+    state, when another session holds it. `finish` notes its outcome on the ticket and does not
+    close it.
+  - A session starts with one line counting the open tickets, never a title.
+    `tickets.sessionLine` turns it off.
+  - A new skill, `tickets`, says when a session claims, creates and closes one.
 - A teammate's brief carries the plan's `## Destination` and `## Statement`, so an implementer
   sees the request and not only its task. They arrive as one line of JSON under a fixed sentence
   that says they add no scope. A Statement over 2000 characters is cut and the brief names the

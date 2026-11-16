@@ -197,6 +197,18 @@ Seeing what is actually there:
   no gate reads it
 - `digest --run <id>` — the compact fleet status board
 
+Tickets:
+
+- `ticket add|list|show|note|edit|claim|release|close|reopen|link|unlink` — a backlog that outlives
+  a session, and an advisory claim per ticket so that sessions in one repository see what another
+  has taken. Tickets live in `.fleetmates/tickets.db` in the main checkout, in SQLite through
+  Node's built-in `node:sqlite`, and git ignores them. A claim never expires: `ticket list` shows
+  each holder and the age of its claim, and `ticket claim <id> --take` records a takeover. A ticket
+  may wait for another (`--after <id>`); `close` needs `--done` or `--dropped` and a note.
+  `init-run --ticket <id>` claims the ticket for the run and refuses when another session holds
+  it. A session starts with one line counting the open tickets, which
+  `config set tickets.sessionLine false` turns off. A claim is advisory: it stops no edit
+
 Cost and retrospective:
 
 - `usage [--session <id>]` — tokens per subagent of a Claude Code session: turns, fixed prefix,
@@ -251,6 +263,7 @@ Housekeeping:
 - `receiving-code-review` — verify feedback technically rather than agreeing performatively
 - `finishing-a-development-branch` — re-runs the gate to verify each phase, then decides how the run branch lands
 - `writing-skills` — creating, editing, and verifying skills before deployment
+- `tickets` — the backlog and claims that sessions in one repository share
 
 ### Gate manifest
 
