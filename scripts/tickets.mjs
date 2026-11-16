@@ -143,13 +143,16 @@ function transaction(db, body) {
     try { db.exec('ROLLBACK') } catch { /* the transaction is already gone */ }
     if (error instanceof TicketError) throw error
     if (/busy|locked/i.test(error.message)) throw new TicketError('the ticket file is busy; another command is writing it. Run the command again.', 1)
-    throw error
+    throw new TicketError(`cannot write the ticket file: ${error.message}`, 4)
   }
 }
 
-const text = (value, name, { max = MAX_TEXT, empty = false } = {}) => {
+// `line` is for a field printed on one line of a list: a line break in a title would let it draw
+// what looks like another ticket under its own.
+const text = (value, name, { max = MAX_TEXT, empty = false, line = false } = {}) => {
   if (typeof value !== 'string' || (!empty && value.trim() === '')) throw new TicketError(`${name} must not be empty`)
   if (value.length > max) throw new TicketError(`${name} is longer than ${max} characters`)
+  if (line && /[\r\n\u0085\u2028\u2029]/.test(value.trim())) throw new TicketError(`${name} must be a single line`)
   return value.trim()
 }
 
@@ -193,8 +196,8 @@ function assertMayChange(ticket, identity, action) {
 }
 
 export function addTicket(db, { title, body = '', priority = 'normal', ref = null, after = [], identity, now = Date.now() }) {
-  const clean = { title: text(title, 'the title', { max: MAX_TITLE }), body: text(body, 'the body', { empty: true }), priority: priorityOf(priority),
-    ref: ref === null ? null : text(ref, 'the reference', { max: MAX_TITLE }) }
+  const clean = { title: text(title, 'the title', { max: MAX_TITLE, line: true }), body: text(body, 'the body', { empty: true }), priority: priorityOf(priority),
+    ref: ref === null ? null : text(ref, 'the reference', { max: MAX_TITLE, line: true }) }
   return transaction(db, () => {
     for (const prerequisite of after) row(db, prerequisite)
     const id = Number(db.prepare('INSERT INTO tickets (title, body, priority, ref, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)')
@@ -228,10 +231,10 @@ export function noteTicket(db, id, { text: body, identity, now = Date.now() }) {
 
 export function editTicket(db, id, { title, body, priority, ref, identity, now = Date.now() }) {
   const changes = {}
-  if (title !== undefined) changes.title = text(title, 'the title', { max: MAX_TITLE })
+  if (title !== undefined) changes.title = text(title, 'the title', { max: MAX_TITLE, line: true })
   if (body !== undefined) changes.body = text(body, 'the body', { empty: true })
   if (priority !== undefined) changes.priority = priorityOf(priority)
-  if (ref !== undefined) changes.ref = text(ref, 'the reference', { max: MAX_TITLE })
+  if (ref !== undefined) changes.ref = text(ref, 'the reference', { max: MAX_TITLE, line: true })
   const fields = Object.keys(changes)
   if (fields.length === 0) throw new TicketError('edit needs at least one of --title, --body, --priority, --ref')
   return transaction(db, () => {
@@ -300,9 +303,10 @@ function dependsOn(db, from, target, seen = new Set()) {
 
 export function linkTicket(db, id, { after, identity, now = Date.now() }) {
   return transaction(db, () => {
-    const ticket = row(db, id)
+    // Any identity may link and unlink, as it may note: a prerequisite is a statement about the
+    // work, not a change to it, and a ticket whose holder is gone must not be stuck behind one.
+    row(db, id)
     row(db, after)
-    assertMayChange(ticket, identity, 'link')
     if (dependsOn(db, after, id)) throw new TicketError(`ticket #${after} already depends on #${id}; the link would form a cycle`, 1)
     if (db.prepare('SELECT 1 FROM blockers WHERE ticket_id = ? AND blocked_by = ?').get(id, after)) return false
     db.prepare('INSERT INTO blockers (ticket_id, blocked_by) VALUES (?, ?)').run(id, after)
@@ -313,7 +317,7 @@ export function linkTicket(db, id, { after, identity, now = Date.now() }) {
 
 export function unlinkTicket(db, id, { after, identity, now = Date.now() }) {
   return transaction(db, () => {
-    assertMayChange(row(db, id), identity, 'unlink')
+    row(db, id)
     const removed = db.prepare('DELETE FROM blockers WHERE ticket_id = ? AND blocked_by = ?').run(id, after).changes
     if (removed === 0) throw new TicketError(`ticket #${id} does not wait for #${after}`, 1)
     note(db, id, identity, 'unlink', `no longer waits for #${after}`, now)
@@ -385,6 +389,9 @@ export function renderList(tickets, { now = Date.now() } = {}) {
   ].filter(Boolean).join('  ')).join('\n')
 }
 
+// Text of several lines is printed behind a bar, so a body cannot draw a field or a note of its own.
+const quoted = (value) => value.split(/\r?\n/).map((l) => `  | ${l}`)
+
 export function renderTicket(t, { now = Date.now() } = {}) {
   const lines = [
     `#${t.id}  ${t.title}`,
@@ -394,9 +401,9 @@ export function renderTicket(t, { now = Date.now() } = {}) {
     t.run_id ? `run: ${t.run_id} (${t.plan_path})` : '',
     t.after.length ? `waits for: ${t.after.map((id) => `#${id}`).join(', ')}${t.blockedBy.length ? `   still blocking: ${t.blockedBy.map((id) => `#${id}`).join(', ')}` : ''}` : '',
     `created: ${new Date(t.created_at).toISOString()} by ${t.created_by}`,
-    t.body ? `\n${t.body}` : '',
+    ...(t.body ? ['body:', ...quoted(t.body)] : []),
     ...(t.notes.length ? ['', 'notes:'] : []),
-    ...t.notes.map((n) => `  ${new Date(n.at).toISOString()}  ${n.author}  ${n.kind}: ${n.text}`),
+    ...t.notes.flatMap((n) => { const [first, ...rest] = n.text.split(/\r?\n/); return [`  ${new Date(n.at).toISOString()}  ${n.author}  ${n.kind}: ${first}`, ...rest.map((l) => `    | ${l}`)] }),
   ]
   return lines.filter((line) => line !== '').join('\n')
 }

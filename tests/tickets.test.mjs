@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import {
   SCHEMA_VERSION, TERMINAL, TicketError, addTicket, attachRun, blockersOf, claimTicket, closeTicket, editTicket, linkTicket,
-  listTickets, noteTicket, openTickets, parseTicketId, releaseTicket, renderList, reopenTicket, sessionLine, showTicket,
+  listTickets, noteTicket, openTickets, parseTicketId, releaseTicket, renderList, renderTicket, reopenTicket, sessionLine, showTicket,
   ticketCounts, ticketIdentity, ticketOfRun, ticketsPath, unlinkTicket,
 } from '../scripts/tickets.mjs'
 import { noteFinishOnTicket, runTicketCommand } from '../scripts/ticket-cli.mjs'
@@ -22,16 +22,22 @@ import { runCli } from '../scripts/cli.mjs'
 const CLI = fileURLToPath(new URL('../scripts/cli.mjs', import.meta.url))
 const run = promisify(execFile)
 
-async function scratch(t, prefix = 'fm-tickets-') {
+// A directory removed after the test. An open SQLite handle blocks the removal on Windows, so a
+// test hands its handles to `closing` and they are closed first, whatever order hooks run in.
+async function scratch(t, prefix = 'fm-tickets-', closing = []) {
   const dir = await mkdtemp(path.join(tmpdir(), prefix))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  t.after(async () => {
+    for (const db of closing) { try { db.close() } catch { /* closed by the test */ } }
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
   return dir
 }
 
 async function store(t) {
-  const dir = await scratch(t)
+  const closing = []
+  const dir = await scratch(t, 'fm-tickets-', closing)
   const db = await openTickets(path.join(dir, 'tickets.db'), { create: true })
-  t.after(() => { try { db.close() } catch { /* closed by the test */ } })
+  closing.push(db)
   return db
 }
 
@@ -59,14 +65,18 @@ async function repo(t) {
 // Runs the command in this process with a chosen identity, and returns its exit code and output.
 async function ticket(root, identity, ...argv) {
   const lines = []
-  const positional = [], flags = {}
+  const positional = [], flags = {}, repeated = {}
   for (let i = 0; i < argv.length; i += 1) {
     if (!argv[i].startsWith('--')) { positional.push(argv[i]); continue }
     const name = argv[i].slice(2)
     if (['all', 'json', 'take', 'done', 'dropped'].includes(name)) flags[name] = true
-    else { flags[name] = argv[i + 1]; i += 1 }
+    else {
+      flags[name] = argv[i + 1]
+      if (name === 'after') (repeated.after ??= []).push(argv[i + 1])
+      i += 1
+    }
   }
-  const code = await runTicketCommand({ root, flags, positional, io: { out: (v) => lines.push(v) }, env: { CLAUDE_CODE_SESSION_ID: identity } })
+  const code = await runTicketCommand({ root, flags, positional, repeated, io: { out: (v) => lines.push(v) }, env: { CLAUDE_CODE_SESSION_ID: identity } })
   return { code, out: lines.join('\n') }
 }
 
@@ -135,12 +145,13 @@ test('a claim is refused while another identity holds the ticket, and --take rec
   assert.equal(claimTicket(db, id, { identity: 's2', take: true, now: 3000 }), 'taken')
   const shown = showTicket(db, id)
   assert.equal(shown.holder, 's2')
+  assert.equal(shown.claimed_at, 3000, 'the age of a claim restarts at a takeover')
   assert.deepEqual(shown.notes.map((n) => [n.author, n.kind, n.text]), [
     ['s1', 'claim', 'claimed the ticket'], ['s2', 'take', 'took the ticket over from s1'],
   ])
 })
 
-test('any identity may note on a ticket; release, close, edit and link need the holder', async (t) => {
+test('any identity may note on a ticket; release, close and edit need the holder', async (t) => {
   const db = await store(t)
   const id = addTicket(db, { title: 'one', identity: 's1' })
   const other = addTicket(db, { title: 'two', identity: 's1' })
@@ -150,7 +161,6 @@ test('any identity may note on a ticket; release, close, edit and link need the 
     () => releaseTicket(db, id, { identity: 's2' }),
     () => closeTicket(db, id, { reason: 'done', text: 'x', identity: 's2' }),
     () => editTicket(db, id, { title: 'renamed', identity: 's2' }),
-    () => linkTicket(db, id, { after: other, identity: 's2' }),
   ]) assert.throws(change, refusal(1, /ticket #1 is held by s1; take it over with `ticket claim 1 --take`/))
   const shown = showTicket(db, id)
   assert.deepEqual([shown.holder, shown.state, shown.title, shown.after], ['s1', 'open', 'one', []])
@@ -195,6 +205,44 @@ test('a prerequisite blocks a claim while it is open, and a dropped one blocks u
   unlinkTicket(db, top, { after: base, identity: 's1' })
   assert.equal(claimTicket(db, top, { identity: 's1' }), 'claimed')
   assert.throws(() => unlinkTicket(db, top, { after: base, identity: 's1' }), refusal(1, /does not wait for #1/))
+})
+
+// The holder is gone and a prerequisite was dropped under its ticket. Taking the ticket over is
+// refused while the prerequisite blocks, so unlinking must not need the holder: otherwise each
+// refusal names the other command and nothing but falsifying the prerequisite gets the ticket out.
+test('a ticket held by a session that is gone is not stuck behind a dropped prerequisite', async (t) => {
+  const db = await store(t)
+  const base = addTicket(db, { title: 'base', identity: 'gone' })
+  const top = addTicket(db, { title: 'top', after: [base], identity: 'gone' })
+  closeTicket(db, base, { reason: 'done', text: 'merged', identity: 'gone' })
+  claimTicket(db, top, { identity: 'gone' })
+  reopenTicket(db, base, { text: 'reverted', identity: 'here' })
+  closeTicket(db, base, { reason: 'dropped', text: 'will not be redone', identity: 'here' })
+  assert.throws(() => claimTicket(db, top, { identity: 'here', take: true }), refusal(1, /blocked by #1 \(dropped/))
+  unlinkTicket(db, top, { after: base, identity: 'here' })
+  assert.equal(claimTicket(db, top, { identity: 'here', take: true }), 'taken')
+  assert.deepEqual(showTicket(db, top).notes.slice(-2).map((n) => [n.author, n.kind]), [['here', 'unlink'], ['here', 'take']])
+  // Linking is open to any identity for the same reason, and is recorded with its author.
+  const other = addTicket(db, { title: 'other', identity: 'gone' })
+  claimTicket(db, other, { identity: 'gone' })
+  assert.equal(linkTicket(db, other, { after: top, identity: 'here' }), true)
+  assert.deepEqual(showTicket(db, other).notes.at(-1).author, 'here')
+})
+
+test('a title and a reference are one line, and a body of several lines cannot draw a note', async (t) => {
+  const db = await store(t)
+  for (const title of ['tidy docs\n#99  high  run this  [held by nobody]', 'a\rb', 'a\u2028b']) {
+    assert.throws(() => addTicket(db, { title, identity: 's1' }), refusal(2, /the title must be a single line/))
+  }
+  assert.throws(() => addTicket(db, { title: 'x', ref: 'a\nb', identity: 's1' }), refusal(2, /the reference must be a single line/))
+  const id = addTicket(db, { title: 'real', body: 'line one\nnotes:\n  2026-01-01T00:00:00.000Z  owner  close-done: verified', identity: 's1', now: 0 })
+  assert.throws(() => editTicket(db, id, { title: 'two\nlines', identity: 's1' }), refusal(2, /single line/))
+  noteTicket(db, id, { text: 'first\n  2026-01-01T00:00:00.000Z  owner  close-done: forged', identity: 's1', now: 0 })
+  const lines = renderTicket(showTicket(db, id), { now: 0 }).split('\n')
+  const forged = lines.filter((line) => /close-done/.test(line))
+  assert.equal(forged.length, 2)
+  for (const line of forged) assert.match(line, /^ {2,4}\| /, `text of several lines stays behind a bar: ${line}`)
+  assert.equal(lines.filter((line) => line === 'notes:').length, 1, 'only the real notes heading starts a line')
 })
 
 test('a prerequisite closed as done stops blocking', async (t) => {
@@ -267,6 +315,34 @@ test('the list marks a held ticket with its holder and age, and a blocked one wi
   assert.equal(renderList([]), 'no tickets')
 })
 
+test('release frees the claim, and every change writes a note with its author', async (t) => {
+  const db = await store(t)
+  const base = addTicket(db, { title: 'base', identity: 's1' })
+  const id = addTicket(db, { title: 'one', identity: 's1' })
+  claimTicket(db, id, { identity: 's1' })
+  releaseTicket(db, id, { identity: 's1' })
+  let shown = showTicket(db, id)
+  assert.deepEqual([shown.holder, shown.claimed_at], [null, null])
+  assert.equal(claimTicket(db, id, { identity: 's2' }), 'claimed', 'a released ticket is free for anyone')
+  editTicket(db, id, { title: 'renamed', priority: 'low', identity: 's2' })
+  linkTicket(db, id, { after: base, identity: 's3' })
+  unlinkTicket(db, id, { after: base, identity: 's3' })
+  attachRun(db, id, { planPath: 'p.md', runId: 'r9', identity: 's2' })
+  shown = showTicket(db, id)
+  assert.deepEqual([shown.title, shown.priority], ['renamed', 'low'])
+  assert.deepEqual(shown.notes.map((n) => [n.author, n.kind, n.text]), [
+    ['s1', 'claim', 'claimed the ticket'],
+    ['s1', 'release', 'released the ticket'],
+    ['s2', 'claim', 'claimed the ticket'],
+    ['s2', 'edit', 'changed title, priority'],
+    ['s3', 'link', 'now waits for #1'],
+    ['s3', 'unlink', 'no longer waits for #1'],
+    ['s2', 'run', 'started run r9 from p.md'],
+  ])
+  assert.throws(() => noteTicket(db, 99, { text: 'x', identity: 's1' }), refusal(2, /there is no ticket #99/))
+  assert.throws(() => noteTicket(db, id, { text: '  ', identity: 's1' }), refusal(2, /the note must not be empty/))
+})
+
 // --- The command ---
 
 test('ticket list prints nothing when there is no ticket file, and creates none', async (t) => {
@@ -302,6 +378,45 @@ test('the command adds, claims, notes, closes and reopens, with the session as a
   assert.equal(shown.notes[2].text, 'left at step two')
 })
 
+test('add takes several prerequisites, and a refused first add leaves no file', async (t) => {
+  const root = await repo(t)
+  assert.deepEqual(await ticket(root, 's1', 'add', '   '), { code: 2, out: 'ticket: the title must not be empty' })
+  assert.equal(existsSync(ticketsPath(root)), false, 'a refused add must not create the file')
+  await ticket(root, 's1', 'add', 'one')
+  await ticket(root, 's1', 'add', 'two')
+  assert.deepEqual(await ticket(root, 's1', 'add', 'three', '--after', '1', '--after', '2'), { code: 0, out: 'created ticket #3' })
+  assert.deepEqual(JSON.parse((await ticket(root, 's1', 'show', '3', '--json')).out).after, [1, 2])
+  assert.deepEqual(await ticket(root, 's1', 'link', '1', '--after', '2', '--after', '3'), { code: 2, out: 'ticket: ticket link takes one --after' })
+  // Through the real parser, which is where a repeated flag used to be dropped.
+  const lines = []
+  assert.equal(await runCli(['ticket', 'add', 'four', '--after', '1', '--after', '2', '--root', root], { out: (v) => lines.push(v), err: (v) => lines.push(v) }), 0, lines.join('\n'))
+  assert.deepEqual(JSON.parse((await ticket(root, 's1', 'show', '4', '--json')).out).after, [1, 2])
+})
+
+test('the command edits, links, unlinks and releases, and list --all shows closed tickets', async (t) => {
+  const root = await repo(t)
+  await ticket(root, 's1', 'add', 'one', '--body', 'the details', '--ref', 'issue 79')
+  await ticket(root, 's1', 'add', 'two')
+  let shown = JSON.parse((await ticket(root, 's1', 'show', '1', '--json')).out)
+  assert.deepEqual([shown.body, shown.ref], ['the details', 'issue 79'])
+  assert.deepEqual(await ticket(root, 's1', 'edit', '1', '--title', 'renamed', '--priority', 'high'), { code: 0, out: 'edited ticket #1' })
+  assert.deepEqual(await ticket(root, 's1', 'link', '1', '--after', '2'), { code: 0, out: 'ticket #1 now waits for #2' })
+  shown = JSON.parse((await ticket(root, 's1', 'show', '1', '--json')).out)
+  assert.deepEqual([shown.title, shown.priority, shown.after], ['renamed', 'high', [2]])
+  assert.match((await ticket(root, 's1', 'show', '1')).out, /^#1 {2}renamed\n[\s\S]*reference: issue 79\n[\s\S]*waits for: #2[\s\S]*body:\n {2}\| the details\nnotes:\n {2}\S+ {2}s1 {2}edit: changed title, priority/)
+  assert.deepEqual(await ticket(root, 's1', 'unlink', '1', '--after', '2'), { code: 0, out: 'ticket #1 no longer waits for #2' })
+  assert.deepEqual(JSON.parse((await ticket(root, 's1', 'show', '1', '--json')).out).after, [])
+  await ticket(root, 's1', 'claim', '1')
+  assert.deepEqual(await ticket(root, 's1', 'release', '1'), { code: 0, out: 'released ticket #1' })
+  assert.equal(JSON.parse((await ticket(root, 's1', 'show', '1', '--json')).out).holder, null)
+  await ticket(root, 's1', 'close', '2', '--dropped', '--note', 'no')
+  assert.equal((await ticket(root, 's1', 'list')).out, '#1  high  renamed')
+  assert.equal((await ticket(root, 's1', 'list', '--all')).out, '#1  high  renamed\n#2  closed:dropped  two')
+  // `edit --title` through the real parser, which keeps its own list of the flags `ticket` reads.
+  const lines = []
+  assert.equal(await runCli(['ticket', 'edit', '1', '--title', 'again', '--root', root], { out: (v) => lines.push(v), err: (v) => lines.push(v) }), 0, lines.join('\n'))
+})
+
 test('the command refuses an unknown subcommand, a flag of another subcommand, and a bad id', async (t) => {
   const root = await repo(t)
   await ticket(root, 's1', 'add', 'one')
@@ -317,9 +432,9 @@ test('the command refuses an unknown subcommand, a flag of another subcommand, a
 test('a ticket title cannot repaint the terminal it is listed in', async (t) => {
   const root = await repo(t)
   const esc = String.fromCharCode(27)
-  await ticket(root, 's1', 'add', `${esc}[2K\rall clear`)
+  await ticket(root, 's1', 'add', `${esc}[2Kall clear`)
   for (const out of [(await ticket(root, 's1', 'list')).out, (await ticket(root, 's1', 'show', '1')).out]) {
-    assert.ok(!out.includes(esc) && !out.includes('\r'), 'no raw control byte reaches the output')
+    assert.ok(!out.includes(esc), 'no raw control byte reaches the output')
     assert.match(out, /<0x1B>/i)
   }
 })
@@ -379,9 +494,10 @@ test('of several processes that claim one ticket at the same moment, exactly one
     assert.match(loser.out, new RegExp(`ticket #1 is held by ${winners[0].id} `))
   }
   const db = await openTickets(ticketsPath(root))
-  t.after(() => db.close())
-  assert.equal(showTicket(db, 1).holder, winners[0].id)
-  assert.equal(showTicket(db, 1).notes.filter((n) => n.kind === 'claim').length, 1)
+  try {
+    assert.equal(showTicket(db, 1).holder, winners[0].id)
+    assert.equal(showTicket(db, 1).notes.filter((n) => n.kind === 'claim').length, 1)
+  } finally { db.close() }
 })
 
 // --- Runs ---
@@ -421,6 +537,10 @@ test('init-run --ticket refuses before any run state exists, and init-run withou
   const missing = await initRun(root, 's2', '--run', 'r1', '--ticket', '9')
   assert.deepEqual(missing, { code: 2, out: 'init-run: there is no ticket #9' })
   assert.equal(existsSync(path.join(root, '.fleetmates', 'r1')), false)
+  const empty = await repo(t)
+  git(empty, 'checkout', '-q', '-b', 'run-branch')
+  assert.deepEqual(await initRun(empty, 's2', '--run', 'r1', '--ticket', '1'), { code: 2, out: 'init-run: there is no ticket #1: this repository has no tickets' })
+  assert.equal(existsSync(path.join(empty, '.fleetmates')), false, 'no run state and no ticket file')
   const bare = await initRun(root, 's2', '--run', 'r1', '--ticket')
   assert.equal(bare.code, 2)
   assert.equal(existsSync(path.join(root, '.fleetmates', 'r1')), false)
@@ -461,6 +581,7 @@ const sessionStart = async (cwd, options = {}) => {
 test('session start adds the ticket line for a main session, and nothing when there are no open tickets', async (t) => {
   const root = await repo(t)
   assert.deepEqual(await sessionStart(root), { code: 0, out: [] })
+  assert.equal(existsSync(ticketsPath(root)), false, 'the hook never creates the ticket file')
   await ticket(root, 's1', 'add', 'one')
   await ticket(root, 's1', 'claim', '1')
   await ticket(root, 's2', 'add', 'two')
@@ -513,4 +634,27 @@ test('a session in a task worktree gets its task reminder and no ticket line', a
   assert.equal(asked, false, 'a teammate session is not asked about tickets')
   assert.equal(out.length, 1)
   assert.match(JSON.parse(out[0]).hookSpecificOutput.additionalContext, /^Fleetmates task reminder\./)
+})
+
+test('tickets.sessionLine is a boolean that either config layer may carry', async (t) => {
+  const { loadConfig, validateKey, validateTickets, ConfigError } = await import('../scripts/config.mjs')
+  const root = await repo(t)
+  assert.equal((await loadConfig(root)).resolved.tickets.sessionLine, true, 'on by default')
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ tickets: { sessionLine: false } }))
+  assert.equal((await loadConfig(root)).resolved.tickets.sessionLine, false, 'the tracked layer turns it off')
+  await ticket(root, 's1', 'add', 'one')
+  assert.equal(await ticketSessionLine(root, 's1'), null)
+  await writeFile(path.join(root, 'fleetmates.local.json'), JSON.stringify({ tickets: { sessionLine: true } }))
+  assert.equal((await loadConfig(root)).resolved.tickets.sessionLine, true, 'the local layer wins')
+  for (const bad of ['no', 1, null]) assert.throws(() => validateTickets({ sessionLine: bad }, 'f'), ConfigError)
+  assert.throws(() => validateTickets({ expiry: 5 }, 'fleetmates.gate.json'), /unknown key in fleetmates\.gate\.json: tickets\.expiry/)
+  assert.equal(validateKey('tickets.sessionLine', false), false)
+  assert.throws(() => validateKey('tickets.sessionLine', 'maybe'), /tickets\.sessionLine must be true or false/)
+  await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ tickets: { sessionLine: 'no' } }))
+  await assert.rejects(loadConfig(root), /tickets\.sessionLine must be true or false/)
+  // `config get` and `config unset` know the key.
+  await writeFile(path.join(root, 'fleetmates.gate.json'), '{}')
+  const lines = []
+  assert.equal(await runCli(['config', 'get', 'tickets.sessionLine', '--root', root], { out: (v) => lines.push(v), err: (v) => lines.push(v) }), 0, lines.join('\n'))
+  assert.equal(lines.at(-1), 'true')
 })

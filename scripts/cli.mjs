@@ -266,7 +266,7 @@ function spellingAdvice(name) {
 
 // Flags whose every occurrence is kept, in order, beside the last-wins value in `flags`:
 // `dispatch --fix-round --task <id> --task <id>` names each task of a repair round.
-const REPEATABLE_FLAGS = new Set(['task'])
+const REPEATABLE_FLAGS = new Set(['task', 'after'])
 
 function parseFlags(argv) {
   const flags = {}
@@ -6542,7 +6542,7 @@ export async function runCli(argv, io = { out: console.log }) {
 
   if (command === 'ticket') {
     const { runTicketCommand } = await import('./ticket-cli.mjs')
-    return runTicketCommand({ root, flags, positional, io })
+    return runTicketCommand({ root, flags, positional, repeated, io })
   }
 
   if (command === 'plan-check') {

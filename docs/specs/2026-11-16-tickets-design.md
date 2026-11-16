@@ -28,6 +28,7 @@ is not involved.
 - The schema version is kept in the file (`PRAGMA user_version`). A command that meets a newer
   version than it knows refuses to write.
 - The file is created by the first `ticket add`. Before that, no command and no hook creates it.
+  When git does not ignore `.fleetmates/` in the repository, that first `add` says so once.
 
 Three tables:
 
@@ -66,7 +67,8 @@ All take `--root <path>`.
 - There is no delete. A ticket created by mistake is closed as dropped. Closed tickets are kept.
 
 Exit codes follow the rest of the CLI: 0 on success, 1 when the command ran and declined (a
-refused claim), 2 for a malformed invocation or an unknown ticket.
+refused claim), 2 for a malformed invocation or an unknown ticket. 4 when the ticket file
+cannot be read or written.
 
 ## Rules
 
@@ -77,8 +79,13 @@ refused claim), 2 for a malformed invocation or an unknown ticket.
 - **A claim never expires**, and it outlives its session. The age shown by `list` is what tells a
   stale claim from a live one; the decision to take it over is made by a person or a session, not
   a timer.
-- **Another identity's ticket.** Any identity may add a note to any ticket. `release`, `close`
-  and `edit` on a ticket held by another identity are refused; the caller takes it over first.
+- **Another identity's ticket.** Any identity may add a note to any ticket, and link or unlink
+  a prerequisite: a ticket whose holder is gone must not be stuck behind a dropped prerequisite,
+  since a takeover is refused while one blocks. `release`, `close` and `edit` on a ticket held by
+  another identity are refused; the caller takes it over first.
+- **One line.** A title and a reference are a single line. In `ticket show`, a body or a note of
+  several lines is printed behind a bar, so ticket text cannot draw a field, a note or another
+  ticket.
 - **A claim is advisory.** Nothing prevents editing files without one. Fleetmates refuses only
   its own commands.
 - **Prerequisites.** `claim` refuses while a prerequisite is open, and names it. A link that

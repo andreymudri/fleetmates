@@ -57,7 +57,7 @@ const on = (flags, name) => {
   return true
 }
 
-export async function runTicketCommand({ root, flags, positional, io, env = process.env, now = Date.now() }) {
+export async function runTicketCommand({ root, flags, positional, repeated = {}, io, env = process.env, now = Date.now() }) {
   const [sub, ...args] = positional
   let db = null
   try {
@@ -66,9 +66,15 @@ export async function runTicketCommand({ root, flags, positional, io, env = proc
     }
     const strays = Object.keys(flags).filter((name) => name !== 'root' && !TICKET_FLAGS[sub].includes(name))
     if (strays.length > 0) throw new TicketError(`ticket ${sub} does not take ${strays.map((f) => `--${f}`).join(', ')}`)
+    // `add` may name several prerequisites. Everywhere else a second --after would be dropped in
+    // silence by a last-wins parser, so it is refused.
+    const afters = (repeated.after ?? (flags.after === undefined ? [] : [flags.after]))
+    if (sub !== 'add' && afters.length > 1) throw new TicketError(`ticket ${sub} takes one --after`)
     const identity = ticketIdentity(env)
     const file = ticketsPath(root)
     const fresh = sub === 'add' && !existsSync(file)
+    // Checked before the file is made: the first `add` creates it, and a refused one must not.
+    if (fresh && args.join(' ').trim() === '') throw new TicketError('the title must not be empty')
     db = await openTickets(file, { create: sub === 'add' })
     // Tickets are meant to stay on this machine. Run state has the same home and most
     // repositories already ignore it; say so once, when the file is made, where they do not.
@@ -84,11 +90,9 @@ export async function runTicketCommand({ root, flags, positional, io, env = proc
       return 0
     }
     if (sub === 'add') {
-      const title = args.join(' ')
-      const after = value(flags, 'after')
       const id = addTicket(db, {
-        title, body: value(flags, 'body') ?? '', priority: value(flags, 'priority') ?? 'normal', ref: value(flags, 'ref') ?? null,
-        after: after === undefined ? [] : [parseTicketId(after)], identity, now,
+        title: args.join(' '), body: value(flags, 'body') ?? '', priority: value(flags, 'priority') ?? 'normal', ref: value(flags, 'ref') ?? null,
+        after: afters.map((after) => { if (typeof after !== 'string') throw new TicketError('write `--after <id>`'); return parseTicketId(after) }), identity, now,
       })
       io.out(`created ticket #${id}`)
       return 0

@@ -2299,7 +2299,7 @@ test('an omitted --phase is still accepted on a single-phase plan', async () => 
 // turn this red, at which point the fix is to name the new site in the header's groups and move
 // the number here — never to raise the number alone.
 const CENSUS_FILES = ['cli.mjs', 'reviews.mjs', 'digest.mjs', 'finish.mjs']
-const CENSUS_EXPECTED = { 'cli.mjs': 172, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
+const CENSUS_EXPECTED = { 'cli.mjs': 174, 'reviews.mjs': 7, 'digest.mjs': 6, 'finish.mjs': 7 }
 
 test('the printable census in the header above still matches the code it counts', async () => {
   const counted = {}
@@ -2499,10 +2499,17 @@ test('a forged collect-reviews stdout is still refused by gate --results', async
 //
 // The count is a checkpoint, and it is now a checkpoint SOMETHING RE-RUNS: the census test below
 // this header derives it from the four scripts on every suite run, so the number in this paragraph
-// can no longer drift away from the code unnoticed. It came to **192 lines: 172 in `cli.mjs`, 7 in
+// can no longer drift away from the code unnoticed. It came to **194 lines: 174 in `cli.mjs`, 7 in
 // `reviews.mjs`, 6 in `digest.mjs`, 7 in `finish.mjs`**.
 //
-// The most recent move was **4 sites in `cli.mjs`**: `plan-check`'s cannot-read refusal (the fs
+// The most recent move was **2 sites in `cli.mjs`**, both in `init-run --ticket`: the line that
+// says the ticket was claimed for the run (the run id is argv), and the notice that the run was
+// created but the ticket was not updated (the store's error text, which can quote a ticket
+// holder another session wrote). The `ticket` command itself prints from
+// `scripts/ticket-cli.mjs`, which is outside this census and wraps its own output. Driven by
+// `tests/tickets.test.mjs`; not row-driven here.
+//
+// The move before that was **4 sites in `cli.mjs`**: `plan-check`'s cannot-read refusal (the fs
 // error, which quotes the `--plan` path) and the prompt document it prints (`printableBlock`; the
 // plan path is argv), `review-depth`'s refusal (git's error text and the `--base` value), and the
 // budget stop's not-checked notice (the transcript store path, which carries a session directory
