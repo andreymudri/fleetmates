@@ -1,9 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { assertClaim, parseDoc, splitFrontmatter, statementsOf } from './md-contract.mjs'
+import { assertClaim, parseDoc, readSkill, splitFrontmatter, statementsOf } from './md-contract.mjs'
 
-const body = async () => readFile(new URL('../skills/finishing-a-development-branch/SKILL.md', import.meta.url), 'utf8')
+// The skill is its core plus its reference files, read as one corpus by the shared reader, so a
+// claim pinned below stays pinned wherever its section lives. Which sections must be in the core
+// itself is pinned in skills.test.mjs.
+const body = async () => (await readSkill('finishing-a-development-branch')).raw
 
 // Structural model of the skill, used by the cleanup-section assertions below instead of a
 // whole-body regex: a regex over the raw text is satisfied by tokens drawn from anywhere in the
@@ -26,10 +29,7 @@ const body = async () => readFile(new URL('../skills/finishing-a-development-bra
 // pinned subject, while the clean tree stayed at 14 pass / 0 fail. Every remaining entry was
 // then matched against the parsed statements of the section it is scoped to: each matches
 // exactly one, so none of them is dead today.
-const doc = async () => {
-  const { body: text } = splitFrontmatter(await body(), 'finishing-a-development-branch')
-  return parseDoc(text, 'finishing-a-development-branch/SKILL.md')
-}
+const doc = async () => (await readSkill('finishing-a-development-branch')).doc
 const cleanup = async () => (await doc()).section(/^Worktree and branch cleanup$/)
 const taxonomy = async () => (await doc()).section(/^Branch taxonomy$/)
 
@@ -244,6 +244,8 @@ test('handles the case where no run directory exists at all', async () => {
 // before the integration options, because its whole point is that a red, pending or unreadable CI
 // keeps the merge from being offered; placed after them, the choice is already on the table.
 const remoteCi = async () => (await doc()).section(/^Remote CI$/)
+// The step and its two rules are in the core; its commands, keys and exit codes are read on demand.
+const remoteCiDetail = async () => (await doc()).section(/^Remote CI: commands, keys and exit codes$/)
 
 test('the Remote CI section sits before the integration options', async () => {
   const d = await doc()
@@ -256,7 +258,7 @@ test('the Remote CI section sits before the integration options', async () => {
 })
 
 test('the Remote CI section waits through ci-wait, invoked from the fleetmates root', async () => {
-  const scope = await remoteCi()
+  const scope = await remoteCiDetail()
   const block = scope.code.find((b) => /\bci-wait\b/.test(b.code))
   assert.ok(block, `${scope.label}: no code block runs ci-wait`)
   assert.match(block.code, /^node "<fleetmates root>\/scripts\/cli\.mjs" ci-wait --branch <run branch> --root <project root>/)
@@ -266,8 +268,8 @@ test('the push is asked for unless ci.push is auto, and no other sentence in the
   assertClaim(await remoteCi(), {
     claim: /^Ask the user before pushing the run branch, unless ci\.push is auto, in which case push without asking\.$/,
     subject: /ci\.push/i,
-    allow: [CI_KEYS],
   })
+  assertClaim(await remoteCiDetail(), { claim: CI_KEYS, subject: /ci\.push/i })
 })
 
 // The values and defaults of both keys, as scripts/config.mjs validates them (`config set ci.push
@@ -275,7 +277,7 @@ test('the push is asked for unless ci.push is auto, and no other sentence in the
 const CI_KEYS = /^Two config keys shape this step: ci\.push is ask \(the default\) or auto, and ci\.waitMinutes is an integer from 1 to 720, 60 by default\.$/
 
 test('the Remote CI section states the values and defaults of ci.push and ci.waitMinutes, then how to set them', async () => {
-  const scope = await remoteCi()
+  const scope = await remoteCiDetail()
   assertClaim(scope, {
     claim: CI_KEYS,
     then: /^Set either through the CLI, in the tracked fleetmates\.gate\.json by default or with --local in the gitignored fleetmates\.local\.json; any other value is refused with exit 2\.$/,

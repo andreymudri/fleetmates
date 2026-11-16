@@ -265,6 +265,12 @@ const CORE = {
     sentences: ['Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it.',
       '**The terminal state is invoking `writing-plans`.**', 'Wait for the user\'s response.'],
   },
+  'finishing-a-development-branch': {
+    headings: ['The completion gate', 'Branch taxonomy', 'Surface unresolved findings', 'Remote CI', 'Integration options',
+      'When to read a reference'],
+    sentences: ['Ask the user before pushing the run branch, unless ci.push is auto, in which case push without\nasking.',
+      'A red, pending or unreadable CI means the merge is not offered', 'that call is not yours to make\nsilently.'],
+  },
   grilling: {
     headings: ['When to use', 'The loop', 'The design tree', 'The shape of one turn', 'Fact-find rather than ask',
       'The open-questions ledger', 'Coverage sweep', 'Stop condition', 'When to read a reference'],

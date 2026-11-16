@@ -1677,7 +1677,7 @@ test('every sentence about the SubagentStop mechanism, in any document, is one a
 const HAND_SWEEP_LEXICON = /rm -rf|rm -fr|by hand|hand-run|hand sweep/i
 
 const HAND_SWEEP_CORPUS = [
-  "finishing-a-development-branch :: Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at.",
+  "finishing-a-development-branch/reference/cleanup.md :: Do not sweep by hand: a hand-run git worktree remove --force or git branch -D supplies neither the recomputed phase gate nor the ancestry proof above — it only does what the flag itself says, on whatever you point it at.",
   "parallel-execution/reference/cleanup-and-worktrees.md :: Do not remove a worktree or delete a teammate branch by hand: git worktree remove refuses one holding uncommitted work only until --force is added, and nothing then stops --force from reaching a worktree whose phase has not passed yet; git branch -D does not measure \"merged\" at all — the one thing it refuses is a branch a registered worktree still has checked out, which is why the worktree has to go first, and otherwise it force-deletes regardless of ancestry — and -d, the flag that does measure, measures against the branch's own upstream or HEAD, never against the run branch.",
   "parallel-execution/reference/cleanup-and-worktrees.md :: The one exception is a task going to a fresh implementer before its phase has passed: this command cannot reach that worktree yet, so it still has to be removed by hand with --force — authorised there because abandoning that teammate's unfinished worktree for a fresh dispatch is the deliberate point, and a mid-stall worktree is exactly the one most likely to hold modified or untracked files a bare remove refuses over — and that authorisation covers the teammate's unfinished work only: --force still follows a junction out of the worktree the same way, and nothing unlinks it first there either, so check the worktree for one first with dir /AL /S and remove the link itself with rd <link> — both from cmd.exe, not PowerShell, where rd and rmdir are aliases for Remove-Item; never a recursive delete, which follows it — before forcing — see the matching exception in \"Worktree mechanics\" below.",
   "parallel-execution/reference/cleanup-and-worktrees.md :: Prune with the command rather than by hand:",
@@ -2122,9 +2122,10 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
 // text alone could not reach is the smallest size that was reached, with the reason beside it.
 // Every skill that keeps part of its text in reference/ files. A capped skill that is not listed
 // here fits its cap whole.
-const SPLIT_SKILLS = ['brainstorming', 'grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates', 'writing-plans']
+const SPLIT_SKILLS = ['brainstorming', 'finishing-a-development-branch', 'grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates', 'writing-plans']
 
 const CORE_CAPS = {
+  'finishing-a-development-branch': 6144,
   // 6144 was the aim; the rule that the only next skill is writing-plans stays in the core.
   brainstorming: 6272,
   // 6144 was the aim. The coverage sweep is walked in every interview, so it stays in the core.
