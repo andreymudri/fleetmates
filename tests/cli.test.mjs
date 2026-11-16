@@ -8202,6 +8202,28 @@ test('workflow with a plan carrying Global Constraints puts every constraint in 
   })
 })
 
+test('workflow puts the plan's Destination and Statement in the brief of every teammate', async () => {
+  await withRepo(async ({ root, planPath, io, lines, git }) => {
+    await writeFile(planPath, `## Destination\n\nThe report shows cost per agent.\n\n## Statement\n\nShow cost per agent.\n\n${PLAN}`, 'utf8')
+    git(['add', '.'])
+    git(['commit', '--quiet', '-m', 'plan with a statement'])
+    git(['branch', '--force', 'main', 'HEAD'])
+    await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)
+    lines.length = 0
+    assert.equal(await runCli(['workflow', '--run', 'r1', '--phase', '1', '--root', root, '--plan', planPath], io), 0, lines.join('\n'))
+    const prompts = await captureAgentPrompts(lines.join('\n'))
+    assert.ok(prompts.length > 0, 'the workflow dispatches at least one teammate')
+    for (const prompt of prompts) {
+      const out = prompt.split('\n')
+      const data = out.findIndex((line) => line.startsWith('PLAN REQUEST CONTEXT.')) + 1
+      assert.notEqual(data, 0, 'the brief names the plan request context')
+      const context = JSON.parse(out[data])
+      assert.equal(context.destination, 'The report shows cost per agent.')
+      assert.equal(context.statement, 'Show cost per agent.')
+    }
+  })
+})
+
 // The brief is generated from the plan at the anchor, never from the checked-out copy. Both
 // `gate` and `complete` already read it that way, so that a teammate cannot widen its own
 // declared file set by editing the working tree. Reading it from disk here left the two
