@@ -1,6 +1,6 @@
 ---
 name: grilling
-description: Use when a plan, spec or design still has unresolved decisions, when the user says "grill me" or asks to be interviewed, when requirements feel fuzzy or underspecified, or when `brainstorming` reaches its question phase.
+description: Use when a plan, spec or design has unresolved decisions, the user says "grill me" or asks to be interviewed, requirements feel fuzzy, or `brainstorming` reaches its question phase.
 ---
 
 # Grilling Requirements

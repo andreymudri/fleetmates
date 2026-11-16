@@ -21,6 +21,25 @@ async function skill(name, options) {
   return { fields, body, doc }
 }
 
+// A description is in the skill list of every session, so its length is paid whether or not the
+// skill is used. An exception keeps its length for the reason beside it.
+const DESCRIPTION_CAP = 160
+const DESCRIPTION_EXCEPTIONS = {
+  // scripts/security-lint.mjs approves this exact text as the one description allowed to claim every task.
+  'using-fleetmates': 161,
+  // Four separate triggers; dropping one would stop the skill being chosen for it.
+  grilling: 181,
+}
+
+test(`each description is at most ${DESCRIPTION_CAP} characters, apart from the named exceptions`, async () => {
+  for (const name of await allSkills()) {
+    const { fields } = await skill(name)
+    const cap = DESCRIPTION_EXCEPTIONS[name] ?? DESCRIPTION_CAP
+    assert.ok(fields.description.length <= cap, `${name}: description is ${fields.description.length} characters; the cap is ${cap}`)
+  }
+  for (const name of Object.keys(DESCRIPTION_EXCEPTIONS)) assert.ok((await allSkills()).includes(name), `exception for missing skill ${name}`)
+})
+
 test('every required fleet skill is present', async () => {
   const names = await allSkills()
   for (const required of REQUIRED) assert.ok(names.includes(required), `missing skill ${required}`)
@@ -270,6 +289,11 @@ const CORE = {
       'When to read a reference'],
     sentences: ['Ask the user before pushing the run branch, unless ci.push is auto, in which case push without\nasking.',
       'A red, pending or unreadable CI means the merge is not offered', 'that call is not yours to make\nsilently.'],
+  },
+  'fleet-supervision': {
+    headings: ['Digest', 'What the repository says', 'Evidence and progress reports', 'Event-driven, not polling', 'The heartbeat',
+      'The SubagentStop backstop', 'Failure handling', 'Scaling suggestions', 'When to read a reference'],
+    sentences: ['It reports; it does not act.'],
   },
   grilling: {
     headings: ['When to use', 'The loop', 'The design tree', 'The shape of one turn', 'Fact-find rather than ask',
