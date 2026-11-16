@@ -14,7 +14,7 @@ found cheaper, pays for text it does not use:
 
 | Text | Size today | When it is charged |
 |---|---|---|
-| Session start hook: all of `using-fleetmates` | 7.0 KB | Every start, resume, clear, compaction and fork |
+| Session start hook: all of `using-fleetmates` | 6.6 KB | Every start, resume, clear, compaction and fork |
 | `brainstorming`, `grilling`, `writing-plans`, `executing-plans`, `finishing-a-development-branch` | 50 KB | Once per feature, and again after each compaction, because loaded skills are attached again |
 | `fleet-supervision`, `fleet-lifecycle` | 23 KB | Fleet runs only |
 | The description line of 15 skills | 2.4 KB | Every session, in the skill list |
@@ -38,15 +38,17 @@ growing back.
 ## 1. Session start
 
 `using-fleetmates/SKILL.md` keeps what every session needs: the rule, the skill priority, the
-routing table, the red flags, how to invoke the CLI, and the non-negotiables. The section
-`Fleet or Solo`, with the fleet policy and the presentation of the choice, moves to
-`skills/using-fleetmates/reference/fleet-or-solo.md`. The core keeps one short paragraph: the
-three eligibility conditions, and the instruction to read the reference before choosing how a
-written plan is executed.
+routing table, the red flags, how to invoke the CLI, and the non-negotiables. Of the section
+`Fleet or Solo`, the eligibility conditions stay, and the fleet policy and the presentation of
+the choice move to `skills/using-fleetmates/reference/fleet-or-solo.md`. The core tells the
+session to read that file when a fleet is eligible.
 
 `hooks/session-start` is unchanged: it injects `SKILL.md`, which is now shorter.
 
-Cap: the text the hook injects is at most 4 KB.
+Cap: the text the hook injects is at most 4864 bytes (4.75 KB), against 6619 today. Moving the
+section leaves about 4.5 KB, and the two changes that follow this one add a condition and a routing
+row. A lower cap would need the red-flag table or the CLI section moved out, and both serve every
+session.
 
 ## 2. Inline path skills
 
