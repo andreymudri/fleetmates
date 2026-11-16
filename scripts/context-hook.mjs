@@ -61,14 +61,47 @@ export function bashResult(hook, input) {
   return response && typeof response === 'object' ? 'pass' : 'unknown'
 }
 
-export async function handleContextHook(input, { env = process.env, now = Date.now, resolve = resolveContext, out = () => {} } = {}) {
+// The one line a main session sees at its start when the repository has open tickets
+// (docs/specs/2026-11-16-tickets-design.md). Counts only: ticket text is written by other sessions
+// and never reaches a session start. Every failure is silence, because a damaged ticket file or an
+// unreadable config must not affect the start of a session.
+export async function ticketSessionLine(cwd, sessionId, env = process.env) {
+  let db = null
+  try {
+    const { openTickets, ticketsPath, mainCheckout, ticketCounts, ticketIdentity, sessionLine } = await import('./tickets.mjs')
+    db = await openTickets(ticketsPath(cwd), { readOnly: true })
+    if (!db) return null
+    try {
+      const { loadConfig } = await import('./config.mjs')
+      if ((await loadConfig(mainCheckout(cwd))).resolved.tickets.sessionLine === false) return null
+    } catch { /* an unreadable config leaves the default, which is to show the line */ }
+    return sessionLine(ticketCounts(db, ticketIdentity({ ...env, ...(typeof sessionId === 'string' && sessionId ? { CLAUDE_CODE_SESSION_ID: sessionId } : {}) })))
+  } catch {
+    return null
+  } finally {
+    try { db?.close() } catch { /* already closed */ }
+  }
+}
+
+export async function handleContextHook(input, { env = process.env, now = Date.now, resolve = resolveContext, out = () => {}, ticketLine = ticketSessionLine } = {}) {
   const hook = input?.hook_event_name
   if (!HOOK_NAMES.includes(hook)) return 0
   // A receipt is evidence that this handler fired, not a promise that other hooks ran.
   try { await appendEvent(receiptPath(env), { kind: 'hook-fired', hook, at: now(), fingerprint: fingerprint(input.session_id ?? '') }, { rotate: true }) } catch { /* optional observation */ }
   if (typeof input.cwd !== 'string' || !input.cwd) return 0
-  const context = await resolve(input.cwd)
-  if (!context) return 0
+  // Outside a repository there is no task context; that used to end the handler by throwing, and
+  // it still reports nothing, but a main session there may have tickets.
+  let context = null
+  try { context = await resolve(input.cwd) } catch { /* no repository, or no readable run */ }
+  if (!context) {
+    // A session in a task worktree is a teammate and gets its task reminder below. Tickets are for
+    // the main session only.
+    if (hook === 'SessionStart') {
+      const line = await ticketLine(input.cwd, input.session_id, env)
+      if (line) out(JSON.stringify({ hookSpecificOutput: { hookEventName: hook, additionalContext: line } }))
+    }
+    return 0
+  }
   const file = ledgerPath(context.root, context.runId, context.taskId)
   if (hook === 'SessionStart') {
     await appendEvent(file, { kind: 'task-started', at: now() })

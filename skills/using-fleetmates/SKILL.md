@@ -41,6 +41,7 @@ apply, the process skill goes first.
 | Changing how the fleet runs — parallelism, model tier or effort per role, caveman output | `fleetmates-config` |
 | A fleet phase finished and needs a verdict before the next phase starts | `phase-gate` |
 | Want to know what a running fleet is doing right now | `fleet-supervision` |
+| Work that outlives this session, or the user names a ticket | `tickets` |
 
 ## Fleet or Solo
 
