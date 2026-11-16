@@ -23,6 +23,7 @@ import { homedir } from 'node:os'
 import { assignPhases } from './phases.mjs'
 import { readState, writeState, claimTask, releaseClaim, readFixRounds, recordFixRound, runDir, writeLocation, worktreeKey, isLocalAbsolute } from './state.mjs'
 import { composeBatchBrief, composeBrief } from './brief.mjs'
+import { planRequestContext } from './plan-context.mjs'
 import { inferGateConfig, checksForPhase, checksForRun, hasRunEntry, RUN_PHASE, fixRoundsForPhase, previewLinks, reviewLenses, protectedPaths } from './gate-config.mjs'
 import {
   loadConfig, readLayer, writeLayer, validateKey, validateLocal, isEnforcementKey, assertSafeKey,
@@ -165,10 +166,10 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|plan-check|review-depth|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|plan-check|review-depth|ticket|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
-  init-run <planPath> --run <id> [--root <path>]
+  init-run <planPath> --run <id> [--ticket <id>] [--root <path>]
   doctor   --run <id> --plan <path> [--base <branch>] [--run-branch <name>] [--root <path>]
   liveness --run <id> --plan <path> [--stale <minutes>] [--root <path>]
   watch    --run <id> --plan <path> [--once] [--root <path>]
@@ -201,6 +202,16 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   plan-check --plan <path> [--root <path>]
   review-depth [--base <branch>] [--json] [--root <path>]
+  ticket add <title> [--body <text>] [--priority high|normal|low] [--ref <text>] [--after <id>] [--root <path>]
+  ticket list [--all] [--json] [--root <path>]
+  ticket show <id> [--json] [--root <path>]
+  ticket note <id> <text> [--root <path>]
+  ticket edit <id> [--title <text>] [--body <text>] [--priority <level>] [--ref <text>] [--root <path>]
+  ticket claim <id> [--take] [--root <path>]
+  ticket release <id> [--root <path>]
+  ticket close <id> (--done | --dropped) --note <text> [--root <path>]
+  ticket reopen <id> --note <text> [--root <path>]
+  ticket link|unlink <id> --after <id> [--root <path>]
   preview-check [--root <path>]
   review-dispatch --run <id> [--phase <name>] [--models <json>] [--plan <path>] [--base <branch>] [--root <path>]
   collect-reviews --run <id> [--phase <name>] [--root <path>]
@@ -238,7 +249,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round', 'dry-run', 'rotate-token', 'once'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round', 'dry-run', 'rotate-token', 'once', 'take', 'done', 'dropped', 'all'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -255,7 +266,7 @@ function spellingAdvice(name) {
 
 // Flags whose every occurrence is kept, in order, beside the last-wins value in `flags`:
 // `dispatch --fix-round --task <id> --task <id>` names each task of a repair round.
-const REPEATABLE_FLAGS = new Set(['task'])
+const REPEATABLE_FLAGS = new Set(['task', 'after'])
 
 function parseFlags(argv) {
   const flags = {}
@@ -530,6 +541,8 @@ export const REQUIRED = {
   // Belong to no run: one reads a plan file, the other the working branch's diff.
   'plan-check': ['plan'],
   'review-depth': [],
+  // Belongs to no run. Its subcommand and ticket id are positional and checked by the command.
+  ticket: [],
   'environment-check': ['file'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
@@ -609,7 +622,7 @@ export const REQUIRED = {
 // dispatches is listed, including the ones taking nothing at all.
 export const UNIVERSAL_FLAGS = new Set(['root'])
 export const KNOWN_FLAGS = {
-  'init-run': ['run'],
+  'init-run': ['run', 'ticket'],
   gate: ['run', 'plan', 'base', 'phase', 'no-fleet', 'results'],
   doctor: ['run', 'plan', 'base', 'run-branch', 'hooks', 'session', 'stop'],
   liveness: ['run', 'plan', 'stale'],
@@ -636,6 +649,7 @@ export const KNOWN_FLAGS = {
   'plan-drift': ['run', 'plan', 'base'],
   'plan-check': ['plan'],
   'review-depth': ['base', 'json'],
+  ticket: ['body', 'priority', 'ref', 'after', 'all', 'json', 'take', 'done', 'dropped', 'note', 'title'],
   'environment-check': ['file', 'execute'],
   'context-bundle': ['file'],
   'workflow-report': ['file'],
@@ -3133,6 +3147,7 @@ const CONFIG_KEYS = [
   'fleet.mode',
   'land.mode',
   'land.autoMerge',
+  'tickets.sessionLine',
 ]
 
 // `unset` may also name one role's entry — `agents.implementer` is a real subtree of the layer
@@ -4339,6 +4354,13 @@ export async function runCli(argv, io = { out: console.log }) {
     // says so, and preserves `gates` and `fixRounds` for exactly that reason), and this command
     // used to re-record `runBranch` from whatever was checked out — so a re-init from an unrelated
     // branch re-pointed the run at it, permanently.
+    // Before any run state is written: a run for a ticket another session holds, or one a
+    // prerequisite blocks, does not start.
+    if (flags.ticket !== undefined) {
+      const { ticketRefusalForRun } = await import('./ticket-cli.mjs')
+      const refusal = await ticketRefusalForRun({ root, ticket: flags.ticket })
+      if (refusal) { io.out(refusal.message); return refusal.code }
+    }
     const recorded = await writePlan(
       root, runId,
       {
@@ -4404,6 +4426,16 @@ export async function runCli(argv, io = { out: console.log }) {
         .map((t) => `${printable(t.id)} (${printable(t.tier)}, ${printable(t.tierSource)})`)
         .join(', ')
       io.out(`phase ${p}: ${ids}`)
+    }
+    if (flags.ticket !== undefined) {
+      const { attachTicketToRun } = await import('./ticket-cli.mjs')
+      try {
+        io.out(`ticket #${await attachTicketToRun({ root, ticket: flags.ticket, planPath, runId })} claimed for run ${printable(runId)}`)
+      } catch (error) {
+        // The run exists; only the record on the ticket is missing. Said, not swallowed.
+        io.out(`init-run: the run was created, but the ticket was not updated: ${printable(error.message)}`)
+        return 1
+      }
     }
     return 0
   }
@@ -4616,10 +4648,12 @@ export async function runCli(argv, io = { out: console.log }) {
     let contextBundles
     try { contextBundles = await learningBundles({ ...contextAnchor, tasks: batch }) }
     catch (error) { io.out(JSON.stringify({ error: error.message })); return 2 }
+    const requestContext = planRequestContext(planMarkdown, planPath)
     if (batch.length > 1) {
       io.out(composeBatchBrief({
         tasks: batch.map((t) => ({ ...t, branch: taskBranchName(runId, t.id) })),
         contextBundles,
+        requestContext,
         runId,
         planPath,
         baseBranch,
@@ -4635,6 +4669,7 @@ export async function runCli(argv, io = { out: console.log }) {
       // nothing looks for.
       task: { ...task, branch: taskBranchName(runId, task.id) },
       contextBundle: contextBundles[task.id] ?? null,
+      requestContext,
       runId,
       planPath,
       baseBranch,
@@ -4761,6 +4796,7 @@ export async function runCli(argv, io = { out: console.log }) {
     catch (error) { io.err(JSON.stringify({ error: error.message })); return 2 }
     const src = await generatePhaseWorkflow({
       contextBundles,
+      requestContext: planRequestContext(planMarkdown, planPath),
       runId,
       phase,
       tasks: phaseTasks,
@@ -4885,6 +4921,7 @@ export async function runCli(argv, io = { out: console.log }) {
     const composeBriefFor = (task) => composeBrief({
       task: { ...task, branch: taskBranchName(runId, task.id) },
       contextBundle: contextBundles[task.id] ?? null,
+      requestContext: planRequestContext(planMarkdown, planPath),
       runId, planPath, baseBranch, constraints, caveman: resolved.caveman, fixRound: fixRoundTasks !== null,
     })
 
@@ -6336,6 +6373,11 @@ export async function runCli(argv, io = { out: console.log }) {
       // Swallow and print nothing — see the comment above.
     }
     const summary = summarizeRun(phaseResults)
+    {
+      const { noteFinishOnTicket } = await import('./ticket-cli.mjs')
+      const reminder = await noteFinishOnTicket({ root, runId, complete: summary.complete })
+      if (reminder) io.out(reminder)
+    }
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
     // Same split the output makes, so a caller branching on the code and a human reading the
@@ -6496,6 +6538,11 @@ export async function runCli(argv, io = { out: console.log }) {
       ].join('\n'))
     }
     return 0
+  }
+
+  if (command === 'ticket') {
+    const { runTicketCommand } = await import('./ticket-cli.mjs')
+    return runTicketCommand({ root, flags, positional, repeated, io })
   }
 
   if (command === 'plan-check') {

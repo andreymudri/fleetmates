@@ -1,5 +1,55 @@
 # Changelog
 
+## v2.11.0
+
+### Added
+
+- Tickets: a backlog that outlives a session, and an advisory claim per ticket so that sessions
+  working in one repository can see what another has taken. `ticket add`, `list`, `show`, `note`,
+  `edit`, `claim`, `release`, `close`, `reopen`, `link` and `unlink`. Tickets live in
+  `.fleetmates/tickets.db` in the main checkout, shared by every worktree, in SQLite through
+  Node's built-in `node:sqlite`; no dependency is added.
+  - A claim never expires. `ticket list` shows each holder and the age of its claim, and
+    `ticket claim <id> --take` records a takeover.
+  - A ticket may wait for another. A prerequisite closed as dropped keeps blocking until it is
+    unlinked.
+  - `init-run --ticket <id>` claims the ticket for the run and refuses, before writing any run
+    state, when another session holds it. `finish` notes its outcome on the ticket and does not
+    close it.
+  - A session starts with one line counting the open tickets, never a title.
+    `tickets.sessionLine` turns it off.
+  - A new skill, `tickets`, says when a session claims, creates and closes one.
+- A teammate's brief carries the plan's `## Destination` and `## Statement`, so an implementer
+  sees the request and not only its task. They arrive as one line of JSON under a fixed sentence
+  that says they add no scope. A Statement over 2000 characters is cut and the brief names the
+  plan file. A batch brief carries them once. A plan without these sections gets the brief it
+  got before.
+- A fourth condition for a fleet: each task is a real boundary, which is independent parallel
+  output, a real prerequisite, or independent review. `writing-plans` says a plan's steps, files
+  and phases do not each need a task.
+
+### Changed
+
+- Skills cost less context. Six skills are now a short core plus `reference/` files read on
+  demand, the form `parallel-execution` and `phase-gate` already had. Text was moved, not
+  reworded or removed. Sizes of `SKILL.md`, in bytes:
+
+  | Skill | Before | After |
+  |---|---|---|
+  | `using-fleetmates` (injected at every session start) | 6397 | 4443 |
+  | `grilling` | 11105 | 6582 |
+  | `writing-plans` | 11631 | 8177 |
+  | `brainstorming` | 8777 | 6184 |
+  | `finishing-a-development-branch` | 14401 | 6132 |
+  | `fleet-supervision` | 16041 | 7489 |
+
+  A feature worked inline (`brainstorming`, `grilling`, `writing-plans`, `executing-plans`,
+  `finishing-a-development-branch`) loads 31.5 KB of skill text, down from 50.3 KB. The session
+  start hook injects 4665 bytes, down from 6619. A test caps each core, so one cannot grow back
+  unnoticed.
+- The descriptions of `grilling`, `brainstorming` and `receiving-code-review` are shorter. Each
+  keeps its `Use when` clause. A test caps every description at 160 characters.
+
 ## v2.10.0
 
 ### Added

@@ -402,6 +402,23 @@ export function validateFleet(fleet, file) {
   return fleet
 }
 
+// Tickets (docs/specs/2026-11-16-tickets-design.md). The one key turns off the line a session
+// sees at its start when the repository has open tickets. It is not a verdict, so both layers may
+// carry it. There is no switch for tickets as a whole: without a ticket file nothing runs.
+const TICKETS_FIELDS = { sessionLine: (v) => typeof v === 'boolean' }
+const TICKETS_RULES = { sessionLine: 'true or false' }
+
+export function validateTickets(tickets, file) {
+  if (tickets === null || typeof tickets !== 'object' || Array.isArray(tickets)) {
+    throw new ConfigError('tickets must be an object')
+  }
+  for (const [field, value] of Object.entries(tickets)) {
+    if (!Object.hasOwn(TICKETS_FIELDS, field)) throw new ConfigError(`unknown key in ${file}: tickets.${field}`)
+    if (!TICKETS_FIELDS[field](value)) throw new ConfigError(`tickets.${field} must be ${TICKETS_RULES[field]}`)
+  }
+  return tickets
+}
+
 export const LAND_MODES = ['pr', 'ask']
 const LAND_FIELDS = {
   mode: (v) => LAND_MODES.includes(v),
@@ -433,7 +450,7 @@ export function validateLocal(local) {
         `${key} is an enforcement key; it may only be set in ${GATE_FILE}`,
       )
     }
-    if (!['maxParallel', 'batchSize', 'caveman', 'agents', 'harnesses', 'watch', 'ci', 'cost', 'fleet', 'land'].includes(key)) {
+    if (!['maxParallel', 'batchSize', 'caveman', 'agents', 'harnesses', 'watch', 'ci', 'cost', 'fleet', 'land', 'tickets'].includes(key)) {
       throw new ConfigError(`unknown key in ${LOCAL_FILE}: ${key}`)
     }
   }
@@ -469,6 +486,7 @@ export function validateLocal(local) {
   if (local.cost !== undefined) validateCost(local.cost, LOCAL_FILE)
   if (local.fleet !== undefined) validateFleet(local.fleet, LOCAL_FILE)
   if (local.land !== undefined) validateLand(local.land, LOCAL_FILE)
+  if (local.tickets !== undefined) validateTickets(local.tickets, LOCAL_FILE)
   return local
 }
 
@@ -511,6 +529,7 @@ export function validateGate(gate) {
   if (gate.cost !== undefined) validateCost(gate.cost, GATE_FILE)
   if (gate.fleet !== undefined) validateFleet(gate.fleet, GATE_FILE)
   if (gate.land !== undefined) validateLand(gate.land, GATE_FILE)
+  if (gate.tickets !== undefined) validateTickets(gate.tickets, GATE_FILE)
   // Every entry in ENFORCEMENT_KEYS has a validator. If a future key joins that list without
   // one, refusing is the right direction — waving an unchecked enforcement key through is the
   // one outcome this must never have — but it is refused as a ConfigError, not as a raw
@@ -607,6 +626,7 @@ export async function loadConfig(root) {
         contextWindows: { ...gate.cost?.contextWindows, ...local?.cost?.contextWindows },
       },
       fleet: { mode: 'ask', ...gate.fleet, ...local?.fleet },
+      tickets: { sessionLine: true, ...gate.tickets, ...local?.tickets },
       // autoMerge is read from the gate layer only; validateLocal refuses it in the local one.
       land: { mode: 'pr', ...gate.land, ...local?.land, autoMerge: gate.land?.autoMerge ?? false },
       watch: { enabled: true, resumes: 2, respawns: 1, staleMinutes: 20, intervalMinutes: 5, learn: true, spinFailures: 5, ...gate.watch, ...local?.watch },
@@ -668,6 +688,8 @@ export function validateKey(dotted, value, file = GATE_FILE) {
   if (ciMatch) { validateCi({ [ciMatch[1]]: value }, LOCAL_FILE); return value }
   const fleetMatch = /^fleet\.([A-Za-z]+)$/.exec(dotted)
   if (fleetMatch) { validateFleet({ [fleetMatch[1]]: value }, GATE_FILE); return value }
+  const ticketsMatch = /^tickets\.([A-Za-z]+)$/.exec(dotted)
+  if (ticketsMatch) { validateTickets({ [ticketsMatch[1]]: value }, file); return value }
   const landMatch = /^land\.([A-Za-z]+)$/.exec(dotted)
   if (landMatch) { validateLand({ [landMatch[1]]: value }, file); return value }
   const agentMatch = /^agents\.([a-z]+)\.(tier|effort)$/.exec(dotted)

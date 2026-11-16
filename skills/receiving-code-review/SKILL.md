@@ -1,6 +1,6 @@
 ---
 name: receiving-code-review
-description: Use when receiving code review feedback, before implementing suggestions - requires technical verification rather than performative agreement or blind implementation.
+description: Use when receiving code review feedback, before implementing suggestions.
 ---
 
 # Receiving Code Review
