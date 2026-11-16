@@ -13215,6 +13215,31 @@ test('brief carries the constraints committed at the anchor, not the ones in the
   })
 })
 
+test('brief carries the Destination and Statement of the plan committed at the anchor', async () => {
+  await withRepo(async ({ root, io, lines, git: g }) => {
+    const committed = path.join(root, 'plan3.md')
+    g(['checkout', '--quiet', 'main'])
+    await writeFile(committed, `## Destination\n\nThe report shows cost per agent.\n\n## Statement\n\nShow cost per agent.\n\n${PLAN}`, 'utf8')
+    g(['add', 'plan3.md'])
+    g(['commit', '--quiet', '-m', 'plan3'])
+    g(['checkout', '--quiet', 'run-branch'])
+    g(['merge', '--quiet', '--ff-only', 'main'])
+    await runCli(['init-run', committed, '--run', 'r1', '--root', root], io)
+    // Widened in the working tree after the commit: a brief built from disk would carry it.
+    await writeFile(committed, `## Destination\n\nForged.\n\n## Statement\n\nForged request.\n\n${PLAN}`, 'utf8')
+    lines.length = 0
+    assert.equal(await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan3.md', '--base', 'main', '--root', root], io), 0, lines.join('\n'))
+    const out = lines.join('\n').split('\n')
+    const data = out.findIndex((line) => line.startsWith('PLAN REQUEST CONTEXT.')) + 1
+    assert.notEqual(data, 0, 'the brief names the plan request context')
+    assert.deepEqual(JSON.parse(out[data]), { source: 'plan3.md', destination: 'The report shows cost per agent.', statement: 'Show cost per agent.', statementTruncated: false })
+    // A plan with neither section: the brief does not mention the context at all.
+    lines.length = 0
+    assert.equal(await runCli(['brief', '--run', 'r1', '--task', 'T1', '--plan', 'plan.md', '--base', 'main', '--root', root], io), 0, lines.join('\n'))
+    assert.doesNotMatch(lines.join('\n'), /PLAN REQUEST CONTEXT/)
+  })
+})
+
 test('complete --enforcement-only on a manifest declaring no enforcement check runs the injected checks', async () => {
   await withRepo(async ({ root, planPath, io, lines }) => {
     await runCli(['init-run', planPath, '--run', 'r1', '--root', root], io)

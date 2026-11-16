@@ -106,7 +106,7 @@ function slimTasks(tasks, runId, tierModels, neighbours) {
 
 export async function generatePhaseWorkflow({
   runId, phase, tasks, maxParallel, tierModels,
-  planPath = '', baseBranch = '', constraints = [], caveman = false, effort = '', neighbours = {}, contextBundles = {},
+  planPath = '', baseBranch = '', constraints = [], caveman = false, effort = '', neighbours = {}, contextBundles = {}, requestContext = null,
   batchSize = 1,
 }) {
   if (!tasks || tasks.length === 0) throw new Error(`no tasks for phase ${phase}`)
@@ -115,7 +115,7 @@ export async function generatePhaseWorkflow({
   const batches = batchTasks(tasks, batchSize)
   if (batches.some((batch) => batch.length > 1)) {
     return generateBatchedWorkflow({
-      runId, phase, tasks, batches, maxParallel, tierModels, planPath, baseBranch, constraints, caveman, effort, neighbours, contextBundles,
+      runId, phase, tasks, batches, maxParallel, tierModels, planPath, baseBranch, constraints, caveman, effort, neighbours, contextBundles, requestContext,
     })
   }
 
@@ -137,7 +137,7 @@ export async function generatePhaseWorkflow({
     // `cli.mjs brief`) can share one implementation.
     __BRIEFS__: () => JSON.stringify(
       Object.fromEntries(slim.map((task) => [task.id, composeBrief({
-        task, runId, planPath, baseBranch, constraints, caveman, contextBundle: contextBundles[task.id] ?? null,
+        task, runId, planPath, baseBranch, constraints, caveman, contextBundle: contextBundles[task.id] ?? null, requestContext,
       })])),
       null,
       2,
@@ -164,7 +164,7 @@ export async function generatePhaseWorkflow({
 // shape of an unbatched phase, in plan order, and reports every task without a result `orphaned`,
 // so nothing that reads a phase's results needs to know the phase was batched.
 async function generateBatchedWorkflow({
-  runId, phase, tasks, batches, maxParallel, tierModels, planPath, baseBranch, constraints, caveman, effort, neighbours, contextBundles,
+  runId, phase, tasks, batches, maxParallel, tierModels, planPath, baseBranch, constraints, caveman, effort, neighbours, contextBundles, requestContext,
 }) {
   const meta = {
     name: `${NAMES.branchPrefix}-${runId}-phase-${phase}`,
@@ -188,7 +188,7 @@ async function generateBatchedWorkflow({
     __BRIEFS__: () => JSON.stringify(
       Object.fromEntries(slimBatches.map((batch) => [batch.id, composeBatchBrief({
         tasks: batch.tasks.map((id) => byId.get(id)),
-        runId, planPath, baseBranch, constraints, caveman, contextBundles,
+        runId, planPath, baseBranch, constraints, caveman, contextBundles, requestContext,
       })])),
       null,
       2,
