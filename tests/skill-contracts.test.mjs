@@ -2122,11 +2122,14 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
 // text alone could not reach is the smallest size that was reached, with the reason beside it.
 // Every skill that keeps part of its text in reference/ files. A capped skill that is not listed
 // here fits its cap whole.
-const SPLIT_SKILLS = ['parallel-execution', 'phase-gate']
+const SPLIT_SKILLS = ['parallel-execution', 'phase-gate', 'using-fleetmates']
 
 const CORE_CAPS = {
   'parallel-execution': 8 * 1024,
   'phase-gate': 8 * 1024,
+  // The session start hook injects this file whole, inside a wrapper of 222 bytes, on every start,
+  // resume, clear, compaction and fork: 4640 here keeps the injected text at most 4864 bytes.
+  'using-fleetmates': 4640,
 }
 
 for (const [name, cap] of Object.entries(CORE_CAPS)) {

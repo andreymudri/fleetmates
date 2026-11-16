@@ -260,6 +260,13 @@ const CORE = {
       'Invariants', 'When to read a reference'],
     sentences: ['never touches the main worktree', 'Phase N+1 does not start before phase N gets a PASS.'],
   },
+  'using-fleetmates': {
+    headings: ['The Rule', 'Skill Priority', 'Routing', 'Fleet or Solo', 'Red Flags', 'Invoking the CLI', 'Non-negotiables',
+      'When to read a reference'],
+    sentences: ['**Invoke relevant skills BEFORE any response or action**', 'The plan has three or more tasks that touch disjoint files.',
+      '| "This is just a simple question" | Questions are tasks. Check for skills. |',
+      'Nothing is reported done without a recorded gate PASS.'],
+  },
   'phase-gate': {
     headings: ['Run it', 'Agent and mcp checks', 'Review the run', 'Reporting rule', 'When to read a reference'],
     sentences: ['Never report a phase done without a recorded PASS in `status.json`.', 'Evidence before claims, always.'],
