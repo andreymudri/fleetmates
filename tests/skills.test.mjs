@@ -260,6 +260,11 @@ const CORE = {
       'Invariants', 'When to read a reference'],
     sentences: ['never touches the main worktree', 'Phase N+1 does not start before phase N gets a PASS.'],
   },
+  brainstorming: {
+    headings: ['Anti-Pattern: "This Is Too Simple To Need A Design"', 'Checklist', 'The Process', 'After the Design', 'When to read a reference'],
+    sentences: ['Do NOT invoke any implementation skill, write any code, scaffold any project, or take any implementation action until you have presented a design and the user has approved it.',
+      '**The terminal state is invoking `writing-plans`.**', 'Wait for the user\'s response.'],
+  },
   grilling: {
     headings: ['When to use', 'The loop', 'The design tree', 'The shape of one turn', 'Fact-find rather than ask',
       'The open-questions ledger', 'Coverage sweep', 'Stop condition', 'When to read a reference'],

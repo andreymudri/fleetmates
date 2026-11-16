@@ -2122,9 +2122,11 @@ test('phase-gate states what still binds on a solo gate, and the persistence rul
 // text alone could not reach is the smallest size that was reached, with the reason beside it.
 // Every skill that keeps part of its text in reference/ files. A capped skill that is not listed
 // here fits its cap whole.
-const SPLIT_SKILLS = ['grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates', 'writing-plans']
+const SPLIT_SKILLS = ['brainstorming', 'grilling', 'parallel-execution', 'phase-gate', 'using-fleetmates', 'writing-plans']
 
 const CORE_CAPS = {
+  // 6144 was the aim; the rule that the only next skill is writing-plans stays in the core.
+  brainstorming: 6272,
   // 6144 was the aim. The coverage sweep is walked in every interview, so it stays in the core.
   grilling: 6656,
   'parallel-execution': 8 * 1024,
