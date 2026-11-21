@@ -1,12 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 import {
-  EVIDENCE_VERSION, NOTE_LIMIT, acceptanceEntries, acceptanceLinesForFinish, evidencePath, readEvidence, summarizeAcceptance,
+  AcceptanceError, EVIDENCE_VERSION, NOTE_LIMIT, acceptanceEntries, acceptanceLinesForFinish, evidencePath, readEvidence, recordEvidence,
+  summarizeAcceptance,
 } from '../scripts/acceptance.mjs'
 import { runCli } from '../scripts/cli.mjs'
 
@@ -279,4 +282,47 @@ test('for finish, a plan without entries gives no line and an unreadable file gi
   const missing = await acceptanceLinesForFinish({ root, runId: 'r1', planPath: 'gone.md' })
   assert.equal(missing.length, 1)
   assert.match(missing[0], /^acceptance: cannot read the plan: /)
+})
+
+// Recording reads the file, changes one entry and writes it back. Without the lock, recorders that
+// read before any of them wrote each keep only their own entry, and every one reports success.
+test('a recorder waits for the lock, and refuses by naming it when it cannot take it in time', async (t) => {
+  const root = await project(t)
+  const file = evidencePath(root, 'r1')
+  const lock = `${file}.lock`
+  const record = { textSha256: 'a'.repeat(64), status: 'pass', note: 'n', commit: git(root, 'rev-parse', 'HEAD'), by: 'terminal', at: 1 }
+
+  await writeFile(lock, '1\n')
+  await assert.rejects(recordEvidence(root, 'r1', 'A1', record, { waitMs: 150 }),
+    (error) => error instanceof AcceptanceError && error.code === 2 && error.message.includes(lock) && /remove that file/.test(error.message))
+  assert.equal(existsSync(file), false, 'nothing is written while another recorder holds the lock')
+  assert.equal(existsSync(lock), true, 'a lock held by someone else is not removed')
+
+  // Released while the recorder waits: it goes on, and leaves no lock behind.
+  const waiting = recordEvidence(root, 'r1', 'A1', record, { waitMs: 5000 })
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(existsSync(file), false)
+  await rm(lock)
+  await waiting
+  assert.deepEqual(Object.keys((await readEvidence(root, 'r1')).entries), ['A1'])
+  assert.equal(existsSync(lock), false)
+
+  // A refused recording releases the lock too.
+  await writeFile(file, '{ not json')
+  await assert.rejects(recordEvidence(root, 'r1', 'A2', record), /is not valid JSON/)
+  assert.equal(existsSync(lock), false)
+})
+
+test('recorders running at the same moment in separate processes all keep their entry', async (t) => {
+  const count = 8
+  const root = await project(t, Array.from({ length: count }, (_, index) => `entry number ${index + 1}`))
+  const cliPath = fileURLToPath(new URL('../scripts/cli.mjs', import.meta.url))
+  const run = promisify(execFile)
+  const results = await Promise.all(Array.from({ length: count }, (_, index) => run(process.execPath,
+    [cliPath, 'acceptance', '--run', 'r1', '--plan', 'plan.md', '--entry', `A${index + 1}`, '--pass', '--note', `checked ${index + 1}`, '--root', root])))
+  assert.deepEqual(results.map((result) => result.stdout.trim()).sort(), Array.from({ length: count }, (_, index) => `recorded A${index + 1} as pass`).sort())
+  const evidence = await readEvidence(root, 'r1')
+  assert.equal(Object.keys(evidence.entries).length, count, 'no recording was lost')
+  assert.equal((await cli(root)).code, 0)
+  assert.equal(existsSync(`${evidencePath(root, 'r1')}.lock`), false)
 })

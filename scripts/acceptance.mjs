@@ -8,8 +8,9 @@
 // line printed here that carries them goes through `printable`.
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { bulletSection } from './plan-sections.mjs'
 import { printable } from './reviews.mjs'
@@ -77,16 +78,48 @@ export async function readEvidence(root, runId) {
   return data
 }
 
+export const LOCK_WAIT_MS = 10000
+
+// One recorder at a time. Recording reads the file, changes one entry and writes it back, so two
+// recorders that both read before either wrote would each keep only their own entry, and both
+// would report success. The lock is a file created exclusively beside the evidence; a recorder
+// that cannot take it in time names it and refuses. It is never reclaimed automatically: a lock
+// left by a killed process is removed by hand, which the refusal says.
+async function withEvidenceLock(file, waitMs, action) {
+  const lock = `${file}.lock`
+  const deadline = Date.now() + waitMs
+  for (let delay = 10; ; delay = Math.min(delay * 2, 200)) {
+    try {
+      await writeFile(lock, `${process.pid}\n`, { flag: 'wx' })
+      break
+    } catch (error) {
+      // Windows reports EPERM for a lock file another process is deleting right now.
+      if (error.code !== 'EEXIST' && error.code !== 'EPERM') throw error
+      if (Date.now() >= deadline) {
+        throw new AcceptanceError(`another recording holds ${lock}; if no acceptance command is running, remove that file and record again`)
+      }
+      await sleep(delay)
+    }
+  }
+  try {
+    return await action()
+  } finally {
+    await rm(lock, { force: true, maxRetries: 5, retryDelay: 20 })
+  }
+}
+
 // Recording again replaces the earlier evidence for the entry. A temporary file and a rename, so
 // a reader never meets half a file.
-export async function recordEvidence(root, runId, id, record) {
-  const evidence = await readEvidence(root, runId)
-  evidence.entries[id] = record
+export async function recordEvidence(root, runId, id, record, { waitMs = LOCK_WAIT_MS } = {}) {
   const file = evidencePath(root, runId)
   await mkdir(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
-  await writeFile(tmp, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
-  await rename(tmp, file)
+  await withEvidenceLock(file, waitMs, async () => {
+    const evidence = await readEvidence(root, runId)
+    evidence.entries[id] = record
+    const tmp = `${file}.${process.pid}.${Math.floor(performance.now() * 1000)}.tmp`
+    await writeFile(tmp, `${JSON.stringify(evidence, null, 2)}\n`, 'utf8')
+    await rename(tmp, file)
+  })
 }
 
 // One row per entry of the plan. Evidence recorded for a different text does not count: the entry

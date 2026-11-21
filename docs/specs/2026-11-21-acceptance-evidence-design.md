@@ -59,6 +59,11 @@ A file that cannot be parsed, or with a version the command does not know, is re
 and the command exits 2. Nothing repairs or replaces it. The write is atomic (a temporary file,
 then a rename).
 
+Recording reads the file, changes one entry and writes it back, so one recorder runs at a time:
+a lock file is created exclusively beside the evidence. A recorder that cannot take the lock in
+10 seconds names it and exits 2. The lock is never reclaimed automatically; one left by a killed
+process is removed by hand.
+
 A run that does not exist is refused with exit 2: evidence belongs to a run created by `init-run`.
 
 ## finish
@@ -84,6 +89,8 @@ Each rule gets a test that is shown to fail when the rule is removed:
 - the three exit codes, and silence for a plan without Acceptance;
 - an unknown entry, a missing note, both or neither of `--pass` and `--fail`, an unknown run;
 - a damaged evidence file is named and refused;
+- a held lock is waited for, then named and refused, and recorders in separate processes at the
+  same moment all keep their entry;
 - `finish` prints the list and keeps its verdict and exit code;
 - a note with control characters cannot repaint the terminal.
 
