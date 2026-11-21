@@ -24,7 +24,7 @@ const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 
 
 function commit(root, message) {
   git(root, 'add', '-A')
-  git(root, '-c', 'user.name=tester', '-c', 'user.email=tester@example.invalid', 'commit', '-q', '--allow-empty', '-m', message)
+  git(root, '-c', 'user.name=tester', '-c', 'user.email=tester@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', message)
   return git(root, 'rev-parse', 'HEAD')
 }
 
@@ -221,22 +221,37 @@ test('a note and an entry with control characters cannot repaint the terminal', 
   assert.equal(listed.lines.filter((line) => /^ {2}A2 /.test(line)).length, 1)
 })
 
-test('finish prints the list after its summary, and its exit code is the same whatever the evidence says', async (t) => {
-  const root = await project(t)
+// The run here FINISHES: its one task is integrated on the run branch, so `finish` exits 0. Only
+// from that state can a test see evidence turning a pass into a refusal.
+test('finish prints the list after its summary, and a finished run stays finished whatever the evidence says', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'fm-acceptance-'))
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  git(root, 'init', '-q', '-b', 'main')
+  await writeFile(path.join(root, '.gitignore'), '.fleetmates/\n')
+  await writeFile(path.join(root, 'plan.md'), PLAN(['the first thing holds', 'the second thing holds']))
   await writeFile(path.join(root, 'fleetmates.gate.json'), JSON.stringify({ phases: { default: { checks: [] } } }))
+  commit(root, 'plan')
   git(root, 'checkout', '-q', '-b', 'work')
+  assert.equal(await runCli(['init-run', 'plan.md', '--run', 'r1', '--root', root], { out() {}, err() {} }), 0)
+  git(root, 'checkout', '-q', '-b', 'fleetmates/r1/T1')
+  await writeFile(path.join(root, 'a.txt'), 'done\n')
+  commit(root, 'T1')
+  git(root, 'checkout', '-q', 'work')
+  git(root, '-c', 'user.name=tester', '-c', 'user.email=tester@example.invalid', '-c', 'commit.gpgsign=false', 'merge', '-q', '--no-ff', 'fleetmates/r1/T1', '-m', 'merge T1')
+
   const finish = async () => {
     const lines = []
     const io = { out: (line) => lines.push(String(line)), err() {} }
     const code = await runCli(['finish', '--run', 'r1', '--plan', 'plan.md', '--base', 'main', '--enforcement-only', '--root', root], io)
     return { code, text: lines.join('\n') }
   }
-  const verdictOf = (text) => text.split('\n').filter((line) => /^ {2}phase |^not finished|^finished/.test(line)).join('\n')
+  const verdictOf = (text) => text.split('\n').filter((line) => /^ {2}phase |^not finished|^every phase passes/.test(line)).join('\n')
 
   const bare = await finish()
-  assert.match(bare.text, /^run r1 /m, 'the summary is printed')
+  assert.equal(bare.code, 0, bare.text)
+  assert.match(verdictOf(bare.text), /^ {2}phase 1 +PASS\nevery phase passes/)
   assert.match(bare.text, /^acceptance for run r1: 0 of 2 entries have pass evidence$/m)
-  assert.ok(bare.text.indexOf('acceptance for run r1') > bare.text.indexOf('run r1 —'), 'the list comes after the summary')
+  assert.ok(bare.text.indexOf('acceptance for run r1') > bare.text.indexOf('every phase passes'), 'the list comes after the summary')
 
   await cli(root, '--entry', 'A1', '--pass', '--note', 'ok')
   await cli(root, '--entry', 'A2', '--pass', '--note', 'ok')
@@ -247,7 +262,7 @@ test('finish prints the list after its summary, and its exit code is the same wh
   const failed = await finish()
   assert.match(failed.text, /^ {2}A2 {2}fail {2}the second thing holds$/m)
 
-  assert.deepEqual([passed.code, failed.code], [bare.code, bare.code], 'evidence never moves the exit code of finish')
+  assert.deepEqual([bare.code, passed.code, failed.code], [0, 0, 0], 'neither missing evidence nor a recorded fail blocks finish')
   assert.equal(verdictOf(passed.text), verdictOf(bare.text))
   assert.equal(verdictOf(failed.text), verdictOf(bare.text))
 })
