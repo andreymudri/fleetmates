@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `acceptance --run <id> --plan <path>`: a recorded state per entry of a plan's `## Acceptance`
+  section. With `--entry <An> (--pass | --fail) --note <text>` it records the evidence for one
+  entry, with the current commit and who recorded it; without `--entry` it lists every entry and
+  exits 1 while one has no evidence or failed. Evidence recorded for an entry whose text later
+  changed does not count. The command runs no test and no gate check.
+  - `finish` prints the same list after its summary. Its verdict and exit code do not change: the
+    evidence is declared by the session that did the work, so it is a record and not a check.
+  - `executing-plans` records the evidence in its last step and names the entries left without it.
+
 ## v2.11.0
 
 ### Added
