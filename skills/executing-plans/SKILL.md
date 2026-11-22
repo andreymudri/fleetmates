@@ -70,6 +70,15 @@ each reviewer to judge the diff against the plan's `## Acceptance` entries as we
 specs. The suggestion is advisory: the command exits 0 whatever it says, no gate reads it, and
 your human partner's standing instructions outrank it.
 
+When the plan has `## Acceptance` entries, record what proved each one, then list them:
+
+    node "<fleetmates root>/scripts/cli.mjs" acceptance --run <runId> --plan <planPath> --entry <An> --pass --note "<what proved it>" --root <project root>
+    node "<fleetmates root>/scripts/cli.mjs" acceptance --run <runId> --plan <planPath> --root <project root>
+
+Record `--fail` for an entry the work does not meet. Name in your final message every entry the
+list shows without `pass` evidence. The evidence is your own record, not a proof: no gate reads
+it, and the command runs no test.
+
 After all tasks are complete and verified, use `finishing-a-development-branch` (if available)
 or otherwise confirm tests pass and present integration options to your human partner.
 

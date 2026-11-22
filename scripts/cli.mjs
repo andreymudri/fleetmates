@@ -166,7 +166,7 @@ function totalTokens(usage) {
     + (usage.output ?? 0) + (usage.reasoning ?? 0)
 }
 
-const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|plan-check|review-depth|ticket|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
+const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|watch|rescue|digest|claim|unclaim|locate|brief|workflow|dispatch|dispatch-reviews|dispatch-integrator|message|sessions|complete|fix|record-fix-round|review-dispatch|collect-reviews|preview-check|plan-drift|plan-check|acceptance|review-depth|ticket|finish|prune-run|rebuild-state|map|map-notes|usage|retro|platform-sim|flaky|ci-wait|merge-guard|ci-local|ui|deck|config> [options]
 
   environment-check --file <json> [--execute] [--root <path>]
   init-run <planPath> --run <id> [--ticket <id>] [--root <path>]
@@ -201,6 +201,8 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
   retro    --run <id> [--date <YYYY-MM-DD>] [--json] [--root <path>]
   plan-drift --run <id> --plan <path> [--base <branch>] [--root <path>]
   plan-check --plan <path> [--root <path>]
+  acceptance --run <id> --plan <path> [--root <path>]
+  acceptance --run <id> --plan <path> --entry <An> (--pass | --fail) --note <text> [--root <path>]
   review-depth [--base <branch>] [--json] [--root <path>]
   ticket add <title> [--body <text>] [--priority high|normal|low] [--ref <text>] [--after <id>] [--root <path>]
   ticket list [--all] [--json] [--root <path>]
@@ -249,7 +251,7 @@ const USAGE = `usage: cli.mjs <environment-check|init-run|gate|doctor|liveness|w
 // presence is the whole signal, so any value written after one is a spelling this CLI cannot
 // act on — see the refusal in parseFlags. Kept as a named set so the advice printed for a
 // rejected spelling can name a form that actually works, per flag.
-const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round', 'dry-run', 'rotate-token', 'once', 'take', 'done', 'dropped', 'all'])
+const VALUELESS_FLAGS = new Set(['no-fleet', 'local', 'yes', 'force', 'enforcement-only', 'fix-round', 'dry-run', 'rotate-token', 'once', 'take', 'done', 'dropped', 'all', 'pass', 'fail'])
 
 // What to tell a caller who wrote a spelling this CLI does not take. It must never name a form
 // that fails — and for `--no-fleet` it must never name one that does the OPPOSITE of what the
@@ -541,6 +543,8 @@ export const REQUIRED = {
   // Belong to no run: one reads a plan file, the other the working branch's diff.
   'plan-check': ['plan'],
   'review-depth': [],
+  // Evidence belongs to a run; the entry, the state and the note are checked by the command.
+  acceptance: ['run', 'plan'],
   // Belongs to no run. Its subcommand and ticket id are positional and checked by the command.
   ticket: [],
   'environment-check': ['file'],
@@ -649,6 +653,7 @@ export const KNOWN_FLAGS = {
   'plan-drift': ['run', 'plan', 'base'],
   'plan-check': ['plan'],
   'review-depth': ['base', 'json'],
+  acceptance: ['run', 'plan', 'entry', 'pass', 'fail', 'note'],
   ticket: ['body', 'priority', 'ref', 'after', 'all', 'json', 'take', 'done', 'dropped', 'note', 'title'],
   'environment-check': ['file', 'execute'],
   'context-bundle': ['file'],
@@ -6378,6 +6383,12 @@ export async function runCli(argv, io = { out: console.log }) {
       const reminder = await noteFinishOnTicket({ root, runId, complete: summary.complete })
       if (reminder) io.out(reminder)
     }
+    {
+      // The Acceptance entries of the plan and the evidence recorded for each. Printed only: the
+      // verdict above comes from the gate's checks, and a recorded `fail` does not change it.
+      const { acceptanceLinesForFinish } = await import('./acceptance.mjs')
+      for (const line of await acceptanceLinesForFinish({ root, runId, planPath: flags.plan })) io.out(line)
+    }
     if (summary.complete) return 0
     // 1 for a phase that was verified and failed; 4 for one that was never verified at all.
     // Same split the output makes, so a caller branching on the code and a human reading the
@@ -6543,6 +6554,11 @@ export async function runCli(argv, io = { out: console.log }) {
   if (command === 'ticket') {
     const { runTicketCommand } = await import('./ticket-cli.mjs')
     return runTicketCommand({ root, flags, positional, repeated, io })
+  }
+
+  if (command === 'acceptance') {
+    const { runAcceptanceCommand } = await import('./acceptance.mjs')
+    return runAcceptanceCommand({ root, flags, io })
   }
 
   if (command === 'plan-check') {
