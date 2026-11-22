@@ -192,6 +192,11 @@ Seeing what is actually there:
   read the code to see whether something an `## Out of Scope` entry excludes is needed. It writes and
   dispatches nothing. Gates and reviewers judge the work against the plan, so this is the one
   check that runs the other way
+- `acceptance --run <id> --plan <path>` — lists the plan's `## Acceptance` entries with the evidence
+  recorded for each, and exits 1 while an entry has none or failed. With
+  `--entry <An> (--pass | --fail) --note <text>` it records the evidence for one entry, with the
+  current commit and who recorded it. It runs nothing. The evidence is declared by the session
+  that did the work: `finish` prints the same list and its verdict does not read it
 - `review-depth [--base <branch>]` — measures the branch's diff and suggests `tests-only`,
   `two-lenses` or `all-lenses` for the final review. Advisory: it exits 0 whatever it suggests and
   no gate reads it
